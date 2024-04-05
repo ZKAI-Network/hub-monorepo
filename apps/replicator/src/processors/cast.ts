@@ -72,7 +72,7 @@ const { processAdd, processRemove } = buildAddRemoveMessageProcessor<
       trx.selectFrom("casts").select(["deletedAt"]).where("fid", "=", message.data.fid).where("hash", "=", hash),
     );
   },
-  async deleteDerivedRow(message, trx) {
+  async deleteDerivedRow(message, trx, isHubEvent: boolean = false) {
     return await executeTakeFirstOrThrow(
       trx
         .updateTable("casts")
@@ -82,7 +82,7 @@ const { processAdd, processRemove } = buildAddRemoveMessageProcessor<
         .returningAll(),
     );
   },
-  async mergeDerivedRow(message, deleted, trx) {
+  async mergeDerivedRow(message, deleted, trx, isHubEvent: boolean = false) {
     const {
       hash,
       data: {
@@ -161,9 +161,11 @@ const { processAdd, processRemove } = buildAddRemoveMessageProcessor<
         PartitionKey: "CAST_ADD",
       },
     ];
-    console.log(`push kinesis start`);
-    await putKinesisRecords(records);
-    console.log(`push kinesis end`);
+    if (isHubEvent) {
+      console.log(`push kinesis start`);
+      await putKinesisRecords(records);
+      console.log(`push kinesis end`);
+    }
 
     return await executeTakeFirstOrThrow(
       trx
@@ -209,92 +211,92 @@ const { processAdd, processRemove } = buildAddRemoveMessageProcessor<
   },
 });
 
-async function processCastsAddKinesis(message: Message,
-  deleted: StoreMessageOperation,
-  trx: DBTransaction,
-): Promise<void>  {
-  const {
-    hash,
-    data: {
-      fid,
-      timestamp,
-      castAddBody: { text, embeds, embedsDeprecated, mentions, mentionsPositions, parentCastId, parentUrl },
-    },
-  } = message;
+// async function processCastsAddKinesis(message: Message,
+//   deleted: StoreMessageOperation,
+//   trx: DBTransaction,
+// ): Promise<void>  {
+//   const {
+//     hash,
+//     data: {
+//       fid,
+//       timestamp,
+//       castAddBody: { text, embeds, embedsDeprecated, mentions, mentionsPositions, parentCastId, parentUrl },
+//     },
+//   } = message;
 
-  const transformedEmbeds: CastEmbedJson[] = embedsDeprecated?.length
-    ? embedsDeprecated.map((url) => ({ url }))
-    : embeds.map(({ castId, url }) => {
-        if (castId) return { castId: { fid: castId.fid, hash: bytesToHex(castId.hash) } };
-        if (url) return { url };
-        throw new AssertionError("Neither castId nor url is defined in embed");
-      });
+//   const transformedEmbeds: CastEmbedJson[] = embedsDeprecated?.length
+//     ? embedsDeprecated.map((url) => ({ url }))
+//     : embeds.map(({ castId, url }) => {
+//         if (castId) return { castId: { fid: castId.fid, hash: bytesToHex(castId.hash) } };
+//         if (url) return { url };
+//         throw new AssertionError("Neither castId nor url is defined in embed");
+//       });
 
-  let rootParentHash = null;
-  let rootParentUrl = null;
-  if (parentCastId) {
-    const { parentFidExists, parentCast } = await executeTakeFirstOrThrow(
-      trx.selectNoFrom(({ eb, fn, selectFrom }) => [
-        eb(selectFrom("fids").select(fn.countAll().as("count")).where("fid", "=", parentCastId.fid), ">", 0).as(
-          "parentFidExists",
-        ),
-        jsonObjectFrom(
-          eb
-            .selectFrom("casts")
-            .select(["fid", "rootParentHash", "rootParentUrl"])
-            .where("hash", "=", parentCastId.hash),
-        ).as("parentCast"),
-      ]),
-      () => new AssertionError("No result"),
-    );
+//   let rootParentHash = null;
+//   let rootParentUrl = null;
+//   if (parentCastId) {
+//     const { parentFidExists, parentCast } = await executeTakeFirstOrThrow(
+//       trx.selectNoFrom(({ eb, fn, selectFrom }) => [
+//         eb(selectFrom("fids").select(fn.countAll().as("count")).where("fid", "=", parentCastId.fid), ">", 0).as(
+//           "parentFidExists",
+//         ),
+//         jsonObjectFrom(
+//           eb
+//             .selectFrom("casts")
+//             .select(["fid", "rootParentHash", "rootParentUrl"])
+//             .where("hash", "=", parentCastId.hash),
+//         ).as("parentCast"),
+//       ]),
+//       () => new AssertionError("No result"),
+//     );
 
-    if (!parentFidExists) {
-      throw new HubEventProcessingBlockedError(
-        `Cast reply parent author with FID ${parentCastId.fid} has not yet been registered`,
-        {
-          blockedOnFid: parentCastId.fid,
-          blockedOnHash: parentCastId.hash,
-        },
-      );
-    }
+//     if (!parentFidExists) {
+//       throw new HubEventProcessingBlockedError(
+//         `Cast reply parent author with FID ${parentCastId.fid} has not yet been registered`,
+//         {
+//           blockedOnFid: parentCastId.fid,
+//           blockedOnHash: parentCastId.hash,
+//         },
+//       );
+//     }
 
-    if (!parentCast) {
-      throw new HubEventProcessingBlockedError(`Parent cast ${bytesToHex(parentCastId.hash)} has not yet been seen`, {
-        blockedOnHash: parentCastId.hash,
-      });
-    }
+//     if (!parentCast) {
+//       throw new HubEventProcessingBlockedError(`Parent cast ${bytesToHex(parentCastId.hash)} has not yet been seen`, {
+//         blockedOnHash: parentCastId.hash,
+//       });
+//     }
 
-    rootParentHash = parentCast.rootParentHash;
-    rootParentUrl = parentCast.rootParentUrl;
-  }
+//     rootParentHash = parentCast.rootParentHash;
+//     rootParentUrl = parentCast.rootParentUrl;
+//   }
   
-  let records = [];
+//   let records = [];
   
-  let recordsJson = {
-    timestamp: farcasterTimeToDate(timestamp),
-    deletedAt: deleted ? new Date() : null,
-    fid,
-    parentFid: parentCastId?.fid || null,
-    hash,
-    rootParentHash: rootParentHash || parentCastId?.hash || null,
-    parentHash: parentCastId?.hash || null,
-    rootParentUrl: rootParentUrl || parentUrl || null,
-    text,
-    embeds: JSON.stringify(transformedEmbeds),
-    mentions: JSON.stringify(mentions),
-    mentionsPositions: JSON.stringify(mentionsPositions),
-  }
+//   let recordsJson = {
+//     timestamp: farcasterTimeToDate(timestamp),
+//     deletedAt: deleted ? new Date() : null,
+//     fid,
+//     parentFid: parentCastId?.fid || null,
+//     hash,
+//     rootParentHash: rootParentHash || parentCastId?.hash || null,
+//     parentHash: parentCastId?.hash || null,
+//     rootParentUrl: rootParentUrl || parentUrl || null,
+//     text,
+//     embeds: JSON.stringify(transformedEmbeds),
+//     mentions: JSON.stringify(mentions),
+//     mentionsPositions: JSON.stringify(mentionsPositions),
+//   }
   
-  records = [
-    {
-      Data: JSON.stringify(recordsJson),
-      PartitionKey: "CAST_ADD",
-    },
-  ];
-  console.log(`push kinesis start`);
-  await putKinesisRecords(records);
-  console.log(`push kinesis end`);
-};
+//   records = [
+//     {
+//       Data: JSON.stringify(recordsJson),
+//       PartitionKey: "CAST_ADD",
+//     },
+//   ];
+//   console.log(`push kinesis start`);
+//   await putKinesisRecords(records);
+//   console.log(`push kinesis end`);
+// };
 
 
-export { processAdd as processCastAdd, processRemove as processCastRemove, processCastsAddKinesis };
+export { processAdd as processCastAdd, processRemove as processCastRemove };

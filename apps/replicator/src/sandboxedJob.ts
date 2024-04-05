@@ -7,12 +7,21 @@ import { getDbClient } from "./db.js";
 import { getHubClient } from "./hub.js";
 import { getRedisClient } from "./redis.js";
 import { threadId, processId, terminateProcess, onTerminate } from "./util.js";
-
+import * as fs from 'fs';
+import path from 'path';
 loadJobs();
+
+const certPath = path.resolve('rds-ca-rsa2048-g1.pem');
 
 const SHUTDOWN_CHECK_INTERVAL_MS = 2_000;
 
-const db = getDbClient(POSTGRES_URL);
+const sslObject =   {
+  rejectUnauthorized: false,
+  cert: fs.readFileSync(certPath, 'utf-8').toString(),
+};
+
+
+const db = getDbClient(POSTGRES_URL, sslObject);
 onTerminate(async () => {
   log.debug("Disconnecting from database");
   await db.destroy();

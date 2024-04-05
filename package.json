@@ -54,7 +54,7 @@
   "dependencies": {
     "@aws-sdk/client-kinesis": "^3.540.0",
     "@aws-sdk/client-location": "^3.540.0",
-    "aws-sdk": "^2.1590.0",
+    "aws-sdk": "^2.1591.0",
     "semver": "^7.5.4"
   }
 }

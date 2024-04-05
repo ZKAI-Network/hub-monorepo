@@ -42,7 +42,7 @@ async function putKinesisRecords(records: KinesisRecord[]) {
 }
 
 
-export const processUserDataAdd = async (message: UserDataAddMessage, trx: DBTransaction) => {
+export const processUserDataAdd = async (message: UserDataAddMessage, trx: DBTransaction, isHubEvent: boolean = false) => {
   const now = new Date();
   
   
@@ -62,9 +62,9 @@ export const processUserDataAdd = async (message: UserDataAddMessage, trx: DBTra
       PartitionKey: "USER_DATA_ADD",
     },
   ];
-  console.log(`push kinesis start`);
-  await putKinesisRecords(records);
-  console.log(`push kinesis end`);
+  // console.log(`push kinesis start`);
+  // await putKinesisRecords(records);
+  // console.log(`push kinesis end`);
   
   await execute(
     trx

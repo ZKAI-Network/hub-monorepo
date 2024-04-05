@@ -87,7 +87,7 @@ const { processAdd: processAddEthereum, processRemove } = buildAddRemoveMessageP
         .where("signerAddress", "=", ethAddress),
     );
   },
-  async deleteDerivedRow(message, trx) {
+  async deleteDerivedRow(message, trx, isHubEvent: boolean = false) {
     const {
       data: { fid, verificationRemoveBody },
     } = message;
@@ -101,7 +101,7 @@ const { processAdd: processAddEthereum, processRemove } = buildAddRemoveMessageP
         .returningAll(),
     );
   },
-  async mergeDerivedRow(message, deleted, trx) {
+  async mergeDerivedRow(message, deleted, trx, isHubEvent: boolean = false) {
     const {
       data: { fid, verificationAddAddressBody: verificationAddBody },
     } = message;
@@ -130,9 +130,9 @@ const { processAdd: processAddEthereum, processRemove } = buildAddRemoveMessageP
         PartitionKey: "VERIFICATIONS_ADD",
       },
     ];
-    console.log(`push kinesis start`);
-    await putKinesisRecords(records);
-    console.log(`push kinesis end`);
+    // console.log(`push kinesis start`);
+    // await putKinesisRecords(records);
+    // console.log(`push kinesis end`);
 
     // Upsert the verification, if it's shadowed by a remove, mark it as deleted
     return await executeTakeFirstOrThrow(
@@ -162,44 +162,44 @@ const { processAdd: processAddEthereum, processRemove } = buildAddRemoveMessageP
 });
 
 
-async function processVerificationsAddKinesis(message: Message,
-  deleted: StoreMessageOperation,
-): Promise<void>  {
-  const {
-    data: { fid, verificationAddAddressBody: verificationAddBody },
-  } = message;
+// async function processVerificationsAddKinesis(message: Message,
+//   deleted: StoreMessageOperation,
+// ): Promise<void>  {
+//   const {
+//     data: { fid, verificationAddAddressBody: verificationAddBody },
+//   } = message;
 
-  const timestamp = farcasterTimeToDate(message.data.timestamp);
+//   const timestamp = farcasterTimeToDate(message.data.timestamp);
 
-  const updatedProps = {
-    timestamp,
-    hash: message.hash,
-    signerAddress: verificationAddBody.address,
-    blockHash: verificationAddBody.blockHash,
-    signature: verificationAddBody.claimSignature,
-  };
+//   const updatedProps = {
+//     timestamp,
+//     hash: message.hash,
+//     signerAddress: verificationAddBody.address,
+//     blockHash: verificationAddBody.blockHash,
+//     signature: verificationAddBody.claimSignature,
+//   };
   
-  let records = [];
+//   let records = [];
   
-  let recordsJson = {
-    deletedAt: deleted ? new Date() : null,
-    fid,
-    ...updatedProps,
-  }
+//   let recordsJson = {
+//     deletedAt: deleted ? new Date() : null,
+//     fid,
+//     ...updatedProps,
+//   }
   
-  records = [
-    {
-      Data: JSON.stringify(recordsJson),
-      PartitionKey: "VERIFICATIONS_ADD",
-    },
-  ];
-  console.log(`push kinesis start`);
-  await putKinesisRecords(records);
-  console.log(`push kinesis end`);
-};
+//   records = [
+//     {
+//       Data: JSON.stringify(recordsJson),
+//       PartitionKey: "VERIFICATIONS_ADD",
+//     },
+//   ];
+//   console.log(`push kinesis start`);
+//   await putKinesisRecords(records);
+//   console.log(`push kinesis end`);
+// };
 
 
 
 // TODO: implement processAdd support for Solana in separate PR
-export { processAddEthereum as processVerificationAddEthAddress, processRemove as processVerificationRemove, processVerificationsAddKinesis };
+export { processAddEthereum as processVerificationAddEthAddress, processRemove as processVerificationRemove};
 

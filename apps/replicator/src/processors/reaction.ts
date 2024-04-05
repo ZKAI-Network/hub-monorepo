@@ -103,7 +103,7 @@ const { processAdd, processRemove } = buildAddRemoveMessageProcessor<
         }),
     );
   },
-  async deleteDerivedRow(message, trx) {
+  async deleteDerivedRow(message, trx, isHubEvent: boolean = false) {
     const { targetCastId, targetUrl } = message.data.reactionBody;
 
     const now = new Date();
@@ -126,7 +126,7 @@ const { processAdd, processRemove } = buildAddRemoveMessageProcessor<
         .returningAll(),
     );
   },
-  async mergeDerivedRow(message, deleted, trx) {
+  async mergeDerivedRow(message, deleted, trx, isHubEvent: boolean = false) {
     const { targetCastId, targetUrl } = message.data.reactionBody;
 
     if (targetCastId) {
@@ -172,9 +172,11 @@ const { processAdd, processRemove } = buildAddRemoveMessageProcessor<
         PartitionKey: "REACTIONS_ADD",
       },
     ];
-    console.log(`push kinesis start`);
-    await putKinesisRecords(records);
-    console.log(`push kinesis end`);
+    if (isHubEvent) {
+      console.log(`push kinesis start`);
+      await putKinesisRecords(records);
+      console.log(`push kinesis end`);
+    }
 
     return await executeTakeFirst(
       trx

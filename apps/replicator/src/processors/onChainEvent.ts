@@ -93,9 +93,9 @@ export const storeChainEvent = async (
       PartitionKey: "CHAIN_EVENT_ADD",
     },
   ];
-  console.log(`push kinesis start`);
-  await putKinesisRecords(records);
-  console.log(`push kinesis end`);
+  // console.log(`push kinesis start`);
+  // await putKinesisRecords(records);
+  // console.log(`push kinesis end`);
   let chainEvent = await executeTakeFirst(
     trx
       .insertInto("chainEvents")
@@ -141,6 +141,7 @@ const processSignerChainEvent = async (
   event: SignerOnChainEvent,
   chainEvent: Selectable<ChainEventRow>,
   trx: DBTransaction,
+  isHubEvent: boolean = false
 ) => {
   const body = event.signerEventBody;
   const timestamp = new Date(event.blockTimestamp * 1000);
@@ -173,9 +174,9 @@ const processSignerChainEvent = async (
           PartitionKey: "SIGNERS_ADD",
         },
       ];
-      console.log(`push kinesis start`);
-      await putKinesisRecords(records);
-      console.log(`push kinesis end`);
+      // console.log(`push kinesis start`);
+      // await putKinesisRecords(records);
+      // console.log(`push kinesis end`);
 
       await execute(
         trx
@@ -238,6 +239,7 @@ const processIdRegisterChainEvent = async (
   event: IdRegisterOnChainEvent,
   chainEvent: Selectable<ChainEventRow>,
   trx: DBTransaction,
+  isHubEvent: boolean = false,
 ) => {
   const body = event.idRegisterEventBody;
   const custodyAddress = body.to.length ? body.to : NULL_ETH_ADDRESS;
@@ -262,9 +264,9 @@ const processIdRegisterChainEvent = async (
           PartitionKey: "FIDS_ADD",
         },
       ];
-      console.log(`push kinesis start`);
-      await putKinesisRecords(records);
-      console.log(`push kinesis end`);
+      // console.log(`push kinesis start`);
+      // await putKinesisRecords(records);
+      // console.log(`push kinesis end`);
       await trx
         .insertInto("fids")
         .values({
@@ -322,6 +324,7 @@ const processStorageRentChainEvent = async (
   event: StorageRentOnChainEvent,
   chainEvent: Selectable<ChainEventRow>,
   trx: DBTransaction,
+  isHubEvent: boolean = false
 ) => {
   const body = event.storageRentEventBody;
   const timestamp = new Date(event.blockTimestamp * 1000);
@@ -342,9 +345,9 @@ const processStorageRentChainEvent = async (
       PartitionKey: "STORAGE_ALLOCATIONS_ADD",
     },
   ];
-  console.log(`push kinesis start`);
-  await putKinesisRecords(records);
-  console.log(`push kinesis end`);
+  // console.log(`push kinesis start`);
+  // await putKinesisRecords(records);
+  // console.log(`push kinesis end`);
   await trx
     .insertInto("storageAllocations")
     .values({
@@ -367,24 +370,24 @@ const processStorageRentChainEvent = async (
     .execute();
 };
 
-export const processOnChainEvent = async (event: OnChainEvent, trx: DBTransaction, skipIfAlreadyStored = true) => {
+export const processOnChainEvent = async (event: OnChainEvent, trx: DBTransaction, isHubEvent: boolean = false, skipIfAlreadyStored = true) => {
   const [chainEvent, alreadyStored] = await storeChainEvent(event, trx);
   if (alreadyStored && skipIfAlreadyStored) return;
 
   switch (event.type) {
     case OnChainEventType.EVENT_TYPE_SIGNER:
       if (!isSignerOnChainEvent(event)) throw new AssertionError(`Invalid SignerOnChainEvent: ${event}`);
-      await processSignerChainEvent(event, chainEvent, trx);
+      await processSignerChainEvent(event, chainEvent, trx, isHubEvent);
       break;
     case OnChainEventType.EVENT_TYPE_SIGNER_MIGRATED:
       break; // Nothing to do since there's no derived tables for this event
     case OnChainEventType.EVENT_TYPE_ID_REGISTER:
       if (!isIdRegisterOnChainEvent(event)) throw new AssertionError(`Invalid IdRegisterOnChainEvent: ${event}`);
-      await processIdRegisterChainEvent(event, chainEvent, trx);
+      await processIdRegisterChainEvent(event, chainEvent, trx, isHubEvent);
       break;
     case OnChainEventType.EVENT_TYPE_STORAGE_RENT:
       if (!isStorageRentOnChainEvent(event)) throw new AssertionError(`Invalid StorageRentOnChainEvent: ${event}`);
-      await processStorageRentChainEvent(event, chainEvent, trx);
+      await processStorageRentChainEvent(event, chainEvent, trx, isHubEvent);
       break;
     case OnChainEventType.EVENT_TYPE_NONE:
       throw new AssertionError(`Invalid OnChainEventType: ${event.type}`);

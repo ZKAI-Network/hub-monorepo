@@ -69,7 +69,7 @@ const { processAdd, processRemove } = buildAddRemoveMessageProcessor<
         .$call((qb) => (targetFid ? qb.where("targetFid", "=", targetFid) : qb)),
     );
   },
-  async deleteDerivedRow(message, trx) {
+  async deleteDerivedRow(message, trx, isHubEvent: boolean = false) {
     const { type, targetFid } = message.data.linkBody;
 
     const now = new Date();
@@ -84,7 +84,7 @@ const { processAdd, processRemove } = buildAddRemoveMessageProcessor<
         .returningAll(),
     );
   },
-  async mergeDerivedRow(message, deleted, trx) {
+  async mergeDerivedRow(message, deleted, trx, isHubEvent: boolean = false) {
     const { type, targetFid, displayTimestamp } = message.data.linkBody;
 
     const fidExists = await trx.selectFrom("fids").where("fid", "=", message.data.fid).executeTakeFirst();
@@ -120,9 +120,9 @@ const { processAdd, processRemove } = buildAddRemoveMessageProcessor<
       },
     ];
     
-    console.log(`push kinesis start`);
-    await putKinesisRecords(records);
-    console.log(`push kinesis end`);
+    // console.log(`push kinesis start`);
+    // await putKinesisRecords(records);
+    // console.log(`push kinesis end`);
 
     return await executeTakeFirst(
       trx

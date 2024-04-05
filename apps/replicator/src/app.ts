@@ -11,6 +11,10 @@ import { terminateProcess, onTerminate } from "./util.js";
 import { getWebApp } from "./web.js";
 import { getWorker } from "./worker.js";
 import { initializeStatsd, statsd } from "./statsd.js";
+import * as fs from 'fs';
+import path from 'path';
+
+const certPath = path.resolve('rds-ca-rsa2048-g1.pem');
 
 // Perform shutdown cleanup on termination signal
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
@@ -35,8 +39,12 @@ process.on("unhandledRejection", async (reason, promise) => {
 if (STATSD_HOST) {
   initializeStatsd(STATSD_HOST, STATSD_METRICS_PREFIX);
 }
+const sslObject =   {
+  rejectUnauthorized: false,
+  cert: fs.readFileSync(certPath, 'utf-8').toString(),
+};
 
-const db = getDbClient(POSTGRES_URL);
+const db = getDbClient(POSTGRES_URL, sslObject);
 onTerminate(async () => {
   log.debug("Disconnecting from database");
   await db.destroy();

@@ -10,6 +10,7 @@ export type ProcessEventFn<THubEvent> = (
   operation: StoreMessageOperation,
   trx: DBTransaction,
   skipSideEffects?: boolean,
+  isHubEvent?: boolean | false
 ) => Promise<void>;
 
 type HandleDerivedDataAddFn<TDerivedData extends MaybeSoftDeletable> = (params: {

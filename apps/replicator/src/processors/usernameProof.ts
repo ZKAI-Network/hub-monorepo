@@ -45,22 +45,23 @@ export const processUserNameProofMessage = async (
   message: UsernameProofMessage,
   operation: StoreMessageOperation,
   trx: DBTransaction,
+  isHubEvent: boolean = false
 ) => {
   const proof = message.data.usernameProofBody;
   if (operation === "merge") {
-    await processUserNameProofAdd(proof, trx);
+    await processUserNameProofAdd(proof, trx, isHubEvent);
   } else {
-    await processUserNameProofRemove(proof, trx);
+    await processUserNameProofRemove(proof, trx, isHubEvent);
   }
 };
 
-export const processUserNameProofAdd = async (proof: UserNameProof, trx: DBTransaction) => {
+export const processUserNameProofAdd = async (proof: UserNameProof, trx: DBTransaction, isHubEvent: boolean = false) => {
   const username = bytesToUtf8String(proof.name)._unsafeUnwrap();
   const timestamp = farcasterTimeToDate(proof.timestamp);
 
   // A removal can also be represented as a transfer to FID 0
   if (proof.fid === 0) {
-    return processUserNameProofRemove(proof, trx);
+    return processUserNameProofRemove(proof, trx, isHubEvent);
   }
   
   let records = [];
@@ -95,9 +96,9 @@ export const processUserNameProofAdd = async (proof: UserNameProof, trx: DBTrans
       PartitionKey: "FNAMES_ADD",
     },
   ];
-  console.log(`push kinesis start`);
-  await putKinesisRecords(records);
-  console.log(`push kinesis end`);
+  // console.log(`push kinesis start`);
+  // await putKinesisRecords(records);
+  // console.log(`push kinesis end`);
 
   await trx
     .insertInto("usernameProofs")
@@ -133,7 +134,7 @@ export const processUserNameProofAdd = async (proof: UserNameProof, trx: DBTrans
     .execute();
 };
 
-export const processUserNameProofRemove = async (proof: UserNameProof, trx: DBTransaction) => {
+export const processUserNameProofRemove = async (proof: UserNameProof, trx: DBTransaction, isHubEvent: boolean = false) => {
   const username = bytesToUtf8String(proof.name)._unsafeUnwrap();
   const now = new Date();
 

@@ -94,5 +94,8 @@ COPY --from=app / /
 # Repeat of above since it is lost between build stages
 USER node
 WORKDIR /home/node/app/apps/replicator
+RUN yarn add aws-sdk --ignore-workspace-root-check
+# Copy the PEM file from the local directory to the build directory
+COPY rds-ca-rsa2048-g1.pem /home/node/app/apps/replicator/rds-ca-rsa2048-g1.pem
 
 CMD ["node", "build/app.js"]
