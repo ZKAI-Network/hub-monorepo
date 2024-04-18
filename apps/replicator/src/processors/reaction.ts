@@ -7,23 +7,22 @@ import {
 } from "@farcaster/hub-nodejs";
 import { Selectable, sql } from "kysely";
 import { buildAddRemoveMessageProcessor } from "../messageProcessor.js";
-import { bytesToHex, farcasterTimeToDate } from "../util.js";
+import { bytesToHex, farcasterTimeToDate, isAfterTargetTimeToday, isBetweenPeriod, isToday } from "../util.js";
 import { ReactionRow, executeTakeFirst } from "../db.js";
 import { AssertionError, HubEventProcessingBlockedError } from "../error.js";
 import AWS from "aws-sdk";
 import { Records } from "aws-sdk/clients/rdsdataservice.js";
-import {AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY } from "../env.js";
+import {AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, useTimePeriodKinesis } from "../env.js";
 
 
-const credentials = new AWS.Credentials({
-  accessKeyId: AWS_ACCESS_KEY_ID,
-  secretAccessKey: AWS_SECRET_ACCESS_KEY
+// const credentials = new AWS.Credentials({
+//   accessKeyId: AWS_ACCESS_KEY_ID,
+//   secretAccessKey: AWS_SECRET_ACCESS_KEY
+// });
+
+AWS.config.update({
+  region: "eu-west-1" 
 });
-
-AWS.config.update({ 
-    credentials: credentials,
-    region: "eu-west-1" 
-  });
 
 const kinesis = new AWS.Kinesis();
 
@@ -172,7 +171,9 @@ const { processAdd, processRemove } = buildAddRemoveMessageProcessor<
         PartitionKey: "REACTIONS_ADD",
       },
     ];
-    if (isHubEvent) {
+    console.log("isTodayReactions: ", isToday(farcasterTimeToDate(message.data.timestamp)));
+    // if (isAfterTargetTimeToday(farcasterTimeToDate(message.data.timestamp)) || (useTimePeriodKinesis && isBetweenPeriod(farcasterTimeToDate(message.data.timestamp)))) {
+    if(isToday(farcasterTimeToDate(message.data.timestamp))) {
       console.log(`push kinesis start`);
       await putKinesisRecords(records);
       console.log(`push kinesis end`);

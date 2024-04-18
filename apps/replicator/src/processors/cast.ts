@@ -3,19 +3,18 @@ import { Selectable, sql } from "kysely";
 import { jsonObjectFrom } from "kysely/helpers/postgres";
 import { buildAddRemoveMessageProcessor } from "../messageProcessor.js";
 import { CastEmbedJson, CastRow, executeTakeFirst, executeTakeFirstOrThrow, DBTransaction } from "../db.js";
-import { bytesToHex, farcasterTimeToDate, StoreMessageOperation } from "../util.js";
+import { bytesToHex, farcasterTimeToDate, StoreMessageOperation, isAfterTargetTimeToday, isBetweenPeriod, isToday } from "../util.js";
 import { AssertionError, HubEventProcessingBlockedError } from "../error.js";
-import { PARTITIONS, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY } from "../env.js";
+import { PARTITIONS, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, useTimePeriodKinesis} from "../env.js";
 import AWS from "aws-sdk";
 import { Records } from "aws-sdk/clients/rdsdataservice.js";
 
-const credentials = new AWS.Credentials({
-  accessKeyId: AWS_ACCESS_KEY_ID,
-  secretAccessKey: AWS_SECRET_ACCESS_KEY
-});
+// const credentials = new AWS.Credentials({
+//   accessKeyId: AWS_ACCESS_KEY_ID,
+//   secretAccessKey: AWS_SECRET_ACCESS_KEY
+// });
 
-AWS.config.update({ 
-    credentials: credentials,
+AWS.config.update({
     region: "eu-west-1" 
   });
 
@@ -161,7 +160,9 @@ const { processAdd, processRemove } = buildAddRemoveMessageProcessor<
         PartitionKey: "CAST_ADD",
       },
     ];
-    if (isHubEvent) {
+    console.log("isTodayCasts: ", isToday(farcasterTimeToDate(timestamp)));
+    // if (isAfterTargetTimeToday(farcasterTimeToDate(timestamp)) || (useTimePeriodKinesis && isBetweenPeriod(farcasterTimeToDate(timestamp))))  {
+    if(isToday(farcasterTimeToDate(timestamp))) {
       console.log(`push kinesis start`);
       await putKinesisRecords(records);
       console.log(`push kinesis end`);

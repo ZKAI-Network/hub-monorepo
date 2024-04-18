@@ -7,15 +7,14 @@ import { Records } from "aws-sdk/clients/rdsdataservice.js";
 import {AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY } from "../env.js";
 
 
-const credentials = new AWS.Credentials({
-  accessKeyId: AWS_ACCESS_KEY_ID,
-  secretAccessKey: AWS_SECRET_ACCESS_KEY
-});
+// const credentials = new AWS.Credentials({
+//   accessKeyId: AWS_ACCESS_KEY_ID,
+//   secretAccessKey: AWS_SECRET_ACCESS_KEY
+// });
 
-AWS.config.update({ 
-    credentials: credentials,
-    region: "eu-west-1" 
-  });
+AWS.config.update({
+  region: "eu-west-1" 
+});
 
 const kinesis = new AWS.Kinesis();
 interface KinesisRecord {
@@ -118,9 +117,9 @@ export const processUserNameProofAdd = async (proof: UserNameProof, trx: DBTrans
     .execute();
 
   
-  console.log(`push kinesis start`);
-  await putKinesisRecords(records2);
-  console.log(`push kinesis end`);
+  // console.log(`push kinesis start`);
+  // await putKinesisRecords(records2);
+  // console.log(`push kinesis end`);
   await trx
     .insertInto("fnames")
     .values({

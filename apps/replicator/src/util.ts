@@ -47,6 +47,7 @@ import { Logger } from "./log.js";
 import { threadId as workerThreadId } from "worker_threads";
 import { pid } from "process";
 import base58 from "bs58";
+import { targetHourKinesis, targetMinuteKinesis, startTimestampKinesis, endTimestampKinesis } from "./env.js";
 
 export type StoreMessageOperation = "merge" | "delete" | "prune" | "revoke";
 
@@ -65,6 +66,63 @@ export function farcasterTimeToDate(time: number | null | undefined): Date | nul
   if (result.isErr()) throw result.error;
   return new Date(result.value);
 }
+
+export function isToday(timestamp: Date): boolean {
+  
+  // const milliseconds = timestamp * 1000;
+  // const targetDate = new Date(timestamp);
+  const date = new Date(timestamp);
+
+  const today = new Date();
+
+  return (
+      date.getDate() === today.getDate() &&
+      date.getMonth() === today.getMonth() &&
+      date.getFullYear() === today.getFullYear()
+  );
+}
+
+export function isAfter(timestamp: number, targetTimestamp: number): boolean {
+  return timestamp > targetTimestamp;
+}
+
+export function isBetweenPeriod(timestamp: Date): boolean {
+  const startTimestamp = Number(startTimestampKinesis);
+  const endTimestamp = Number(endTimestampKinesis);
+  const targetTime = new Date(timestamp).getTime();
+  return targetTime >= startTimestamp && targetTime <= endTimestamp;
+}
+
+export function isAfterTargetTimeToday(timestamp: Date): boolean {
+  const targetHour = 2
+  // Number(targetHourKinesis);
+  const targetMinute = 25
+  // Number(targetMinuteKinesis);
+  const targetDate = new Date(timestamp);
+  // console.log(`targetHour: ${targetHour}`)
+  // console.log(`targetMinute: ${targetMinute}`)
+  // console.log(`timestamp: ${timestamp}`)
+  // console.log(`targetDate: ${targetDate}`)
+
+  const now = new Date();
+
+  const targetTimeToday = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate(),
+      targetHour,
+      targetMinute,
+      0, // Seconds
+      0 // Milliseconds
+  );
+
+  // console.log(`targetDate.getTime(): ${targetDate.getTime()}`)
+  // console.log(`targetTimeToday.getTime(): ${targetTimeToday.getTime()}`)
+
+  // Check if the target date is today and if the current time is after the target time today
+  return targetDate.getDate() === now.getDate() && targetDate.getTime() > targetTimeToday.getTime();
+}
+
 
 export function bytesToHex(bytes: undefined): undefined;
 export function bytesToHex(bytes: null): null;
