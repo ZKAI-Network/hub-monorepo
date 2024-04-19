@@ -48,6 +48,35 @@ import { threadId as workerThreadId } from "worker_threads";
 import { pid } from "process";
 import base58 from "bs58";
 import { targetHourKinesis, targetMinuteKinesis, startTimestampKinesis, endTimestampKinesis } from "./env.js";
+import AWS from "aws-sdk";
+
+AWS.config.update({
+  region: "eu-west-1" 
+});
+
+const kinesis = new AWS.Kinesis();
+
+interface KinesisRecord {
+  Data: string;
+  PartitionKey: string;
+}
+
+export async function putKinesisRecords(records: KinesisRecord[], streamName: string) {
+const params = {
+  Records: records,
+  StreamName: streamName,
+};
+
+// Put records into the Kinesis stream
+kinesis.putRecords(params, (err, data) => {
+  if (err) {
+    console.error("Error putting records:", err);
+  } else {
+    console.log(data);
+    console.log("Successfully put records:", data.Records.length);
+  }
+});
+}
 
 export type StoreMessageOperation = "merge" | "delete" | "prune" | "revoke";
 

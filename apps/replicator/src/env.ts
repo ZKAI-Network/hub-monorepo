@@ -5,8 +5,8 @@ export const COLORIZE =
   process.env["COLORIZE"] === "true" ? true : process.env["COLORIZE"] === "false" ? false : process.stdout.isTTY;
 export const LOG_LEVEL = process.env["LOG_LEVEL"] || "info";
 
-export const HUB_HOST = process.env["HUB_HOST"] || "localhost:2283";
-export const HUB_SSL = process.env["HUB_SSL"] === "true" ? true : false;
+export const HUB_HOST = (process.env["HUB_HOST"]) || (process.env["HUB_HOST_NEYNAR"]) || "localhost:2283";
+export const HUB_SSL = (process.env["HUB_SSL"] === "true" ? true : false) || (process.env["HUB_SSL_NEYNAR"] === "true" ? true : false);
 
 export const POSTGRES_URL = process.env["POSTGRES_URL"];
 
@@ -31,4 +31,4 @@ export const targetHourKinesis = process.env["TARGET_HOUR_KINESIS"] || 0;
 export const targetMinuteKinesis = process.env["TARGET_MINUTE_KINESIS"] || 0;
 export const endTimestampKinesis = process.env["END_TIMESTAMP_KINESIS"] || 0;
 export const startTimestampKinesis = process.env["START_TIMESTAMP_KINESIS"] || 0;
-export const useTimePeriodKinesis = process.env["USE_TIME_PERIOD_KINESIS"] || false;
+export const useTimePeriodKinesis = process.env["USE_TIME_PERIOD_KINESIS"] === "true" ? true : false;

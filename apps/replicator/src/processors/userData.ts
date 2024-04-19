@@ -1,43 +1,10 @@
 import { UserDataAddMessage } from "@farcaster/hub-nodejs";
 import { DBTransaction, execute } from "../db.js";
-import { farcasterTimeToDate } from "../util.js";
+import { farcasterTimeToDate, putKinesisRecords } from "../util.js";
 
 import AWS from "aws-sdk";
 import { Records } from "aws-sdk/clients/rdsdataservice.js";
 import {AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY } from "../env.js";
-
-
-// const credentials = new AWS.Credentials({
-//   accessKeyId: AWS_ACCESS_KEY_ID,
-//   secretAccessKey: AWS_SECRET_ACCESS_KEY
-// });
-
-AWS.config.update({
-  region: "eu-west-1" 
-});
-const kinesis = new AWS.Kinesis();
-
-interface KinesisRecord {
-  Data: string;
-  PartitionKey: string;
-}
-
-async function putKinesisRecords(records: KinesisRecord[]) {
-  const params = {
-    Records: records,
-    StreamName: "farcaster-stream", // Replace 'your-stream-name' with your Kinesis stream name
-  };
-
-  // Put records into the Kinesis stream
-  kinesis.putRecords(params, (err, data) => {
-    if (err) {
-      console.error("Error putting records:", err);
-    } else {
-      console.log(data);
-      console.log("Successfully put records:", data.Records.length);
-    }
-  });
-}
 
 
 export const processUserDataAdd = async (message: UserDataAddMessage, trx: DBTransaction, isHubEvent: boolean = false) => {
@@ -61,7 +28,7 @@ export const processUserDataAdd = async (message: UserDataAddMessage, trx: DBTra
     },
   ];
   // console.log(`push kinesis start`);
-  // await putKinesisRecords(records);
+  // await putKinesisRecords(records, "farcaster-stream");
   // console.log(`push kinesis end`);
   
   await execute(

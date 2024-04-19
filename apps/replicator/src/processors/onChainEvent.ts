@@ -18,48 +18,13 @@ import {
   decodeSignedKeyRequestMetadata,
   exhaustiveGuard,
   farcasterTimeToDate,
+  putKinesisRecords
 } from "../util.js";
 import { AssertionError } from "../error.js";
 import { PARTITIONS, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY } from "../env.js";
 
 import AWS from "aws-sdk";
 import { KinesisClient, PutRecordsCommand } from "@aws-sdk/client-kinesis";
-// import { Records } from "aws-sdk/clients/rdsdataservice.js";
-
-
-// const credentials = new AWS.Credentials({
-//   accessKeyId: AWS_ACCESS_KEY_ID,
-//   secretAccessKey: AWS_SECRET_ACCESS_KEY
-// });
-
-AWS.config.update({
-  region: "eu-west-1" 
-});
-
-const kinesis = new AWS.Kinesis();
-
-interface KinesisRecord {
-  Data: string;
-  PartitionKey: string;
-}
-
-async function putKinesisRecords(records: KinesisRecord[]) {
-  const params = {
-    Records: records,
-    StreamName: "farcaster-stream", // Replace 'your-stream-name' with your Kinesis stream name
-  };
-
-  // Put records into the Kinesis stream
-  // const command = new PutRecordsCommand(params);
-  kinesis.putRecords(params, (err, data) => {
-    if (err) {
-      console.error("Error putting records:", err);
-    } else {
-      console.log(data);
-      console.log("Successfully put records:", data.Records.length);
-    }
-  });
-}
 
 
 export const storeChainEvent = async (
@@ -93,7 +58,7 @@ export const storeChainEvent = async (
     },
   ];
   // console.log(`push kinesis start`);
-  // await putKinesisRecords(records);
+  // await putKinesisRecords(records, "farcaster-stream");
   // console.log(`push kinesis end`);
   let chainEvent = await executeTakeFirst(
     trx
@@ -174,7 +139,7 @@ const processSignerChainEvent = async (
         },
       ];
       // console.log(`push kinesis start`);
-      // await putKinesisRecords(records);
+      // await putKinesisRecords(records, "farcaster-stream");
       // console.log(`push kinesis end`);
 
       await execute(
@@ -264,7 +229,7 @@ const processIdRegisterChainEvent = async (
         },
       ];
       // console.log(`push kinesis start`);
-      // await putKinesisRecords(records);
+      // await putKinesisRecords(records, "farcaster-stream");
       // console.log(`push kinesis end`);
       await trx
         .insertInto("fids")
@@ -345,7 +310,7 @@ const processStorageRentChainEvent = async (
     },
   ];
   // console.log(`push kinesis start`);
-  // await putKinesisRecords(records);
+  // await putKinesisRecords(records, "farcaster-stream");
   // console.log(`push kinesis end`);
   await trx
     .insertInto("storageAllocations")
