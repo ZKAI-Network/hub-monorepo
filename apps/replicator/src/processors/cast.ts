@@ -123,17 +123,11 @@ const { processAdd, processRemove } = buildAddRemoveMessageProcessor<
       mentionsPositions: JSON.stringify(mentionsPositions),
     }
     
-    records = [
-      {
-        Data: JSON.stringify(recordsJson),
-        PartitionKey: "CAST_ADD",
-      },
-    ];
+    
     console.log("isTodayCasts: ", isToday(farcasterTimeToDate(timestamp)));
     // if (isAfterTargetTimeToday(farcasterTimeToDate(timestamp)) || (useTimePeriodKinesis && isBetweenPeriod(farcasterTimeToDate(timestamp))))  {
     if(isToday(farcasterTimeToDate(timestamp))) {
       console.log(`push kinesis start`);
-      await putKinesisRecords(records, "farcaster-stream");
       records = [
         {
           Data: JSON.stringify(recordsJson),
