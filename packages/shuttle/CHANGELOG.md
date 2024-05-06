@@ -1,0 +1,105 @@
+# @farcaster/hub-shuttle
+
+## 0.2.8
+
+### Patch Changes
+
+- f784afd2: feat: support link compact state message in shuttle
+- Updated dependencies [7b374890]
+  - @farcaster/hub-nodejs@0.11.11
+
+## 0.2.7
+
+### Patch Changes
+
+- 1b502fc2: Allow skipping validation when storing message
+
+## 0.2.6
+
+### Patch Changes
+
+- 7490ff5d: Switch from @figma/hot-shots to @farcaster/hot-shots
+- afa31270: Stop DNS lookups for loopback address in statsd calls
+
+## 0.2.5
+
+### Patch Changes
+
+- 20c4ef64: Validate merge messages only when storing messages
+
+## 0.2.4
+
+### Patch Changes
+
+- 30b8d64f: fix: increase hub timeout limit
+- 80aadc6a: Buffer statsd calls before sending on socket
+- 589e5770: fix: Preserve redis stream backwards compatibility
+- 0c1ab37f: feat: add fid sharding
+
+## 0.2.3
+
+### Patch Changes
+
+- feat(shuttle): add message state to handler
+
+## 0.2.2
+
+### Patch Changes
+
+- fix: ack the correct group name to fix stale bug
+
+## 0.2.1
+
+### Patch Changes
+
+- feat(shuttle): Make event stream more customizable
+
+## 0.2.0
+
+### Minor Changes
+
+- chore: Rename to shuttle and release beta
+
+## 0.1.6
+
+### Patch Changes
+
+- feat(shuttle): support prune, revokes and deletes
+- 1051b3dd: feat: Support redis streams for scalability and add reconciliation workers
+
+## 0.1.5
+
+### Patch Changes
+
+- fix: Fix module import issue
+
+## 0.1.4
+
+### Patch Changes
+
+- fix: Fix interfaces import
+
+## 0.1.3
+
+### Patch Changes
+
+- feat: Refactor message reconciliation to accept function
+
+## 0.1.2
+
+### Patch Changes
+
+- 86cfa4f5: fix: add missing db and redis exports to hub-shuttle
+- 5282c730: fix: add support for windows file paths in example hub-shuttle app
+
+## 0.1.1
+
+### Patch Changes
+
+- fix: update exports
+
+## 0.1.0
+
+### Minor Changes
+
+- 31d54545: feat: initial release of hub-shuttle

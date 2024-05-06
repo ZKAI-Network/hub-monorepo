@@ -1,4 +1,12 @@
-import { bytesToHexString, HubAsyncResult, HubError, OnChainEvent, toFarcasterTime } from "@farcaster/hub-nodejs";
+import {
+  bytesToHexString,
+  HubAsyncResult,
+  HubError,
+  HubResult,
+  Message,
+  OnChainEvent,
+  toFarcasterTime,
+} from "@farcaster/hub-nodejs";
 import { err, ok, Result, ResultAsync } from "neverthrow";
 import cron from "node-cron";
 import { logger } from "../../utils/logger.js";
@@ -10,11 +18,16 @@ import { statsd } from "../../utils/statsd.js";
 import { getHubState, putHubState } from "../../storage/db/hubState.js";
 import { sleep } from "../../utils/crypto.js";
 
-export const DEFAULT_VALIDATE_AND_REVOKE_MESSAGES_CRON = "0 12 * * *"; // Every day at 12:00 UTC (4 am PST)
+export const DEFAULT_VALIDATE_AND_REVOKE_MESSAGES_CRON = "10 20 * * *"; // Every day at 20:10 UTC (00:10 pm PST)
+
+type ValidateResultWithMessage = {
+  result: HubAsyncResult<number | undefined>;
+  message: Message;
+};
 
 // How much time to allocate to validating and revoking each fid.
-// 50 fids per second, which translates to 1/14th of the FIDs will be checked in just over 2 hours.
-const TIME_SCHEDULED_PER_FID_PER_S = 50;
+// 50 fids per second, which translates to 1/28th of the FIDs will be checked in just over 2 hours.
+const TIME_SCHEDULED_PER_FID_MS = 1000 / 50;
 
 const log = logger.child({
   component: "ValidateOrRevokeMessagesJob",
@@ -28,9 +41,13 @@ export class ValidateOrRevokeMessagesJobScheduler {
   private _cronTask?: cron.ScheduledTask;
   private _running = false;
 
-  constructor(db: RocksDB, engine: Engine) {
+  // Wether to check all messages for fid%14 == new Date().getDate()%14
+  private _checkAllFids;
+
+  constructor(db: RocksDB, engine: Engine, checkAllFids = true) {
     this._db = db;
     this._engine = engine;
+    this._checkAllFids = checkAllFids;
   }
 
   start(cronSchedule?: string) {
@@ -117,7 +134,7 @@ export class ValidateOrRevokeMessagesJobScheduler {
         // Throttle the job.
         // We run at the rate of 50 fids per second. If we are running ahead of schedule, we sleep to catch up
         if (fid % 100 === 0) {
-          const allotedTimeMs = TIME_SCHEDULED_PER_FID_PER_S * fid * 1000;
+          const allotedTimeMs = (fid - lastFid) * TIME_SCHEDULED_PER_FID_MS;
           const elapsedTimeMs = Date.now() - start;
           if (allotedTimeMs > elapsedTimeMs) {
             const sleepTimeMs = allotedTimeMs - elapsedTimeMs;
@@ -185,18 +202,37 @@ export class ValidateOrRevokeMessagesJobScheduler {
     ).unwrapOr(0);
 
     // Every 14 days, we do a full scan of all messages for this FID, to make sure we don't miss anything
-    const doFullScanForFid = fid % 14 === new Date(Date.now()).getDate() % 14;
+    const doFullScanForFid = this._checkAllFids && fid % 28 === new Date(Date.now()).getDate() % 28;
 
     if (!doFullScanForFid && latestSignerEventTs < lastJobTimestamp) {
       return ok(0);
     }
 
-    log.info(
+    log.debug(
       { fid, lastJobTimestamp, latestSignerEventTs, doFullScanForFid },
       "ValidateOrRevokeMessagesJob: checking FID",
     );
 
     let count = 0;
+    let validatePromises: ValidateResultWithMessage[] = [];
+    const processValidationResults = async () => {
+      const promises = validatePromises;
+      validatePromises = [];
+
+      for (const { result, message } of promises) {
+        (await result).match(
+          (result) => {
+            if (result !== undefined) {
+              log.info({ fid, hash: bytesToHexString(message.hash)._unsafeUnwrap() }, "revoked message");
+            }
+          },
+          (e) => {
+            log.error({ errCode: e.errCode }, `error validating and revoking message: ${e.message}`);
+          },
+        );
+      }
+    };
+
     await this._db.forEachIteratorByPrefix(prefix, async (key, value) => {
       if ((key as Buffer).length !== 1 + FID_BYTES + 1 + TSHASH_LENGTH) {
         // Not a message key, so we can skip it.
@@ -216,20 +252,22 @@ export class ValidateOrRevokeMessagesJobScheduler {
       )();
 
       if (message.isOk()) {
-        const result = await this._engine.validateOrRevokeMessage(message.value);
+        validatePromises.push({
+          // Mark as low-priority, so as to not interfere with gossip or sync messages
+          result: this._engine.validateOrRevokeMessage(message.value, true),
+          message: message.value,
+        });
+
+        // Every 10,000 messages, process the results to avoid memory issues
+        if (validatePromises.length > 10_000) {
+          await processValidationResults();
+        }
         count += 1;
-        result.match(
-          (result) => {
-            if (result !== undefined) {
-              log.info({ fid, hash: bytesToHexString(message.value.hash)._unsafeUnwrap() }, "revoked message");
-            }
-          },
-          (e) => {
-            log.error({ errCode: e.errCode }, `error validating and revoking message: ${e.message}`);
-          },
-        );
       }
     });
+
+    // Process any remaining results
+    await processValidationResults();
 
     return ok(count);
   }

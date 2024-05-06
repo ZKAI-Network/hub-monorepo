@@ -33,6 +33,7 @@ Hubble Options:
   -c, --config <filepath>               Path to the config file.
   --db-name <name>                      The name of the RocksDB instance. (default: rocks.hub._default)
   --process-file-prefix <prefix>        Prefix for file to which hub process number is written. (default: "")
+  --log-individual-messages             Log individual submitMessage status. If disabled, log one line per second (default: disabled)"
 
 Ethereum Options:
   -m, --eth-mainnet-rpc-url <url>       RPC URL of a Mainnet ETH Node (or comma separated list of URLs)
@@ -60,6 +61,12 @@ Snapshots Options:
 
 Metrics:
   --statsd-metrics-server <host>        The host to send statsd metrics to, eg "127.0.0.1:8125". (default: disabled)
+  
+Diagnostics:
+  --opt-out-diagnostics [boolean]       Opt-out of sending diagnostics data to the Farcaster foundation.
+                                        Diagnostics are used to troubleshoot user issues and
+                                        improve health of the network. (default: disabled)
+ --diagnostic-report-url <url>          The URL to send diagnostic reports to. (default: https://report.farcaster.xyz)                                        
 
 Networking Options:
   -a, --allowed-peers <peerIds...>      Only peer with specific peer ids. (default: all peers allowed)

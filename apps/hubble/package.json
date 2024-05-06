@@ -1,6 +1,6 @@
 {
   "name": "@farcaster/hubble",
-  "version": "1.11.4",
+  "version": "1.12.1",
   "description": "Farcaster Hub",
   "author": "",
   "license": "",
@@ -39,7 +39,7 @@
     "test": "yarn test:ts && yarn test:rust",
     "test:ts": "yarn build:all && NODE_OPTIONS=\"--experimental-vm-modules --max-old-space-size=4096\" jest",
     "test:rust": "cargo test --manifest-path ./src/addon/Cargo.toml",
-    "test:ci": "yarn build:all && yarn test:rust --release && ENVIRONMENT=test NODE_OPTIONS=\"--experimental-vm-modules --max-old-space-size=4096\" jest --ci --forceExit --coverage -w 3"
+    "test:ci": "yarn build:all && yarn test:rust --release && ENVIRONMENT=test NODE_OPTIONS=\"--experimental-vm-modules --max-old-space-size=4096\" jest --ci --forceExit --coverage -w 2"
   },
   "devDependencies": {
     "@libp2p/interface-mocks": "^9.0.0",
@@ -73,8 +73,9 @@
     "@aws-sdk/lib-storage": "^3.504.0",
     "@chainsafe/libp2p-gossipsub": "6.1.0",
     "@chainsafe/libp2p-noise": "^11.0.0 ",
+    "@datastructures-js/priority-queue": "^6.3.1",
     "@faker-js/faker": "~7.6.0",
-    "@farcaster/hub-nodejs": "^0.11.8",
+    "@farcaster/hub-nodejs": "^0.11.11",
     "@fastify/cors": "^8.4.0",
     "@figma/hot-shots": "^9.0.0-figma.1",
     "@grpc/grpc-js": "~1.8.21",
@@ -101,7 +102,7 @@
     "rate-limiter-flexible": "^2.4.1",
     "rwlock": "~5.0.0",
     "semver": "^7.5.4",
-    "tar": "^6.1.15",
+    "tar": "^6.2.1",
     "tiny-typed-emitter": "~2.1.0",
     "viem": "^1.12.2"
   }

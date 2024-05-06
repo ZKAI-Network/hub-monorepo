@@ -1,15 +1,15 @@
 use std::{borrow::Borrow, convert::TryInto, sync::Arc};
 
 use crate::db::{RocksDB, RocksDbTransactionBatch};
-use crate::protos;
 use crate::protos::link_body::Target;
 use crate::protos::message_data::Body;
 use crate::protos::{message_data, LinkBody, Message, MessageData, MessageType};
 use crate::store::{
-    encode_messages_to_js_object, get_page_options, get_store, hub_error_to_js_throw, make_fid_key,
-    make_user_key, message, HubError, IntoI32, IntoU8, MessagesPage, PageOptions, RootPrefix,
-    Store, StoreDef, StoreEventHandler, UserPostfix, PAGE_SIZE_MAX, TS_HASH_LENGTH,
+    get_page_options, get_store, hub_error_to_js_throw, make_fid_key, make_user_key, message,
+    HubError, IntoI32, IntoU8, MessagesPage, PageOptions, RootPrefix, Store, StoreDef,
+    StoreEventHandler, UserPostfix, PAGE_SIZE_MAX, TS_HASH_LENGTH,
 };
+use crate::{protos, THREAD_POOL};
 use neon::prelude::{JsPromise, JsString};
 use neon::types::buffer::TypedArray;
 use neon::{
@@ -18,6 +18,8 @@ use neon::{
     types::{JsBox, JsNumber},
 };
 use prost::Message as _;
+
+use super::deferred_settle_messages;
 
 /**
  * LinkStore persists Link Messages in RocksDB using a two-phase CRDT set to guarantee
@@ -162,7 +164,7 @@ impl LinkStore {
 
         store
             .db()
-            .for_each_iterator_by_prefix_unbounded(&prefix, page_options, |key, value| {
+            .for_each_iterator_by_prefix(&prefix, page_options, |key, value| {
                 if r#type.is_empty() || value.eq(r#type.as_bytes()) {
                     let ts_hash_offset = prefix.len();
                     let fid_offset: usize = ts_hash_offset + TS_HASH_LENGTH;
@@ -188,7 +190,8 @@ impl LinkStore {
                 Ok(false)
             })?;
 
-        let messages = message::get_many_messages(store.db().borrow(), message_keys)?;
+        let messages_bytes =
+            message::get_many_messages_as_bytes(store.db().borrow(), message_keys)?;
         let next_page_token = if last_key.len() > 0 {
             Some(last_key[prefix.len()..].to_vec())
         } else {
@@ -196,7 +199,7 @@ impl LinkStore {
         };
 
         Ok(MessagesPage {
-            messages,
+            messages_bytes,
             next_page_token,
         })
     }
@@ -231,6 +234,19 @@ impl LinkStore {
 
         let r = store.get_remove(&partial_message);
         r
+    }
+
+    // Generates a unique key used to store a LinkCompactState message key in the store
+    fn link_compact_state_add_key(fid: u32, link_type: &String) -> Result<Vec<u8>, HubError> {
+        let mut key = Vec::with_capacity(
+            Self::ROOT_PREFIXED_FID_BYTE_SIZE + Self::POSTFIX_BYTE_SIZE + Self::LINK_TYPE_BYTE_SIZE,
+        );
+
+        key.extend_from_slice(&make_user_key(fid));
+        key.push(UserPostfix::LinkCompactStateMessage.as_u8());
+        key.extend_from_slice(&link_type.as_bytes());
+
+        Ok(key)
     }
 
     /// Generates a unique key used to store a LinkAdd message key in the LinksAdd Set index.
@@ -414,15 +430,13 @@ impl LinkStore {
         let link_type = cx.argument::<JsString>(1).map(|s| s.value(&mut cx))?;
         let page_options = get_page_options(&mut cx, 2)?;
 
-        let messages = match Self::get_link_adds_by_fid(&store, fid, link_type, &page_options) {
-            Ok(messages) => messages,
-            Err(e) => return hub_error_to_js_throw(&mut cx, e),
-        };
-
         let channel = cx.channel();
         let (deferred, promise) = cx.promise();
-        deferred.settle_with(&channel, move |mut cx| {
-            encode_messages_to_js_object(&mut cx, messages)
+
+        THREAD_POOL.lock().unwrap().execute(move || {
+            let messages = Self::get_link_adds_by_fid(&store, fid, link_type, &page_options);
+
+            deferred_settle_messages(deferred, &channel, messages);
         });
 
         Ok(promise)
@@ -435,15 +449,13 @@ impl LinkStore {
         let link_type = cx.argument::<JsString>(1).map(|s| s.value(&mut cx))?;
         let page_options = get_page_options(&mut cx, 2)?;
 
-        let messages = match Self::get_link_removes_by_fid(&store, fid, link_type, &page_options) {
-            Ok(messages) => messages,
-            Err(e) => return hub_error_to_js_throw(&mut cx, e),
-        };
-
         let channel = cx.channel();
         let (deferred, promise) = cx.promise();
-        deferred.settle_with(&channel, move |mut cx| {
-            encode_messages_to_js_object(&mut cx, messages)
+
+        THREAD_POOL.lock().unwrap().execute(move || {
+            let messages = Self::get_link_removes_by_fid(&store, fid, link_type, &page_options);
+
+            deferred_settle_messages(deferred, &channel, messages);
         });
 
         Ok(promise)
@@ -561,15 +573,13 @@ impl LinkStore {
 
         let target = crate::protos::link_body::Target::TargetFid(target_fid as u64);
 
-        let messages = match Self::get_links_by_target(&store, &target, link_type, &page_options) {
-            Ok(messages) => messages,
-            Err(e) => return hub_error_to_js_throw(&mut cx, e),
-        };
-
         let channel = cx.channel();
         let (deferred, promise) = cx.promise();
-        deferred.settle_with(&channel, move |mut cx| {
-            encode_messages_to_js_object(&mut cx, messages)
+
+        THREAD_POOL.lock().unwrap().execute(move || {
+            let messages = Self::get_links_by_target(&store, &target, link_type, &page_options);
+
+            deferred_settle_messages(deferred, &channel, messages);
         });
 
         Ok(promise)
@@ -586,15 +596,13 @@ impl LinkStore {
             return cx.throw_error("fid is required");
         }
 
-        let messages = match Self::get_all_link_messages_by_fid(&store, fid, &page_options) {
-            Ok(messages) => messages,
-            Err(e) => return hub_error_to_js_throw(&mut cx, e),
-        };
-
         let channel = cx.channel();
         let (deferred, promise) = cx.promise();
-        deferred.settle_with(&channel, move |mut cx| {
-            encode_messages_to_js_object(&mut cx, messages)
+
+        THREAD_POOL.lock().unwrap().execute(move || {
+            let messages = Self::get_all_link_messages_by_fid(&store, fid, &page_options);
+
+            deferred_settle_messages(deferred, &channel, messages);
         });
 
         Ok(promise)
@@ -614,6 +622,10 @@ impl StoreDef for LinkStore {
         MessageType::LinkRemove.into_u8()
     }
 
+    fn compact_state_message_type(&self) -> u8 {
+        MessageType::LinkCompactState.into_u8()
+    }
+
     fn is_add_type(&self, message: &Message) -> bool {
         message.signature_scheme == protos::SignatureScheme::Ed25519 as i32
             && message.data.is_some()
@@ -627,6 +639,14 @@ impl StoreDef for LinkStore {
             && message.data.is_some()
             && message.data.as_ref().is_some_and(|data| {
                 data.r#type == MessageType::LinkRemove.into_i32() && data.body.is_some()
+            })
+    }
+
+    fn is_compact_state_type(&self, message: &Message) -> bool {
+        message.signature_scheme == protos::SignatureScheme::Ed25519 as i32
+            && message.data.is_some()
+            && message.data.as_ref().is_some_and(|data| {
+                data.r#type == MessageType::LinkCompactState.into_i32() && data.body.is_some()
             })
     }
 
@@ -668,6 +688,32 @@ impl StoreDef for LinkStore {
     ) -> Result<(), HubError> {
         // For links, there will be no additional conflict logic
         Ok(())
+    }
+
+    fn make_compact_state_add_key(&self, message: &Message) -> Result<Vec<u8>, HubError> {
+        message
+            .data
+            .as_ref()
+            .ok_or(HubError::invalid_parameter("invalid message data"))
+            .and_then(|data| {
+                data.body
+                    .as_ref()
+                    .ok_or(HubError::invalid_parameter("invalid message data body"))
+                    .and_then(|body_option| match body_option {
+                        Body::LinkCompactStateBody(link_compact_body) => {
+                            Self::link_compact_state_add_key(
+                                data.fid as u32,
+                                &link_compact_body.r#type,
+                            )
+                        }
+                        Body::LinkBody(link_body) => {
+                            Self::link_compact_state_add_key(data.fid as u32, &link_body.r#type)
+                        }
+                        _ => Err(HubError::invalid_parameter(
+                            "link_compact_body not specified",
+                        )),
+                    })
+            })
     }
 
     fn make_add_key(&self, message: &Message) -> Result<Vec<u8>, HubError> {

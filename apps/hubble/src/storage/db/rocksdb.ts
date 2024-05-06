@@ -17,8 +17,12 @@ import {
   rsDbPut,
   RustDb,
   rustErrorToHubError,
+  rsDbCountKeysAtPrefix,
+  rsDbDeleteAllKeysInRange,
+  rsDbKeysExist,
 } from "../../rustfunctions.js";
 import { PageOptions } from "storage/stores/types.js";
+import { HubAsyncResult } from "@farcaster/hub-nodejs";
 
 export type DbStatus = "new" | "opening" | "open" | "closing" | "closed";
 
@@ -112,6 +116,10 @@ class RocksDB {
     return v.value;
   }
 
+  async keysExist(keys: Buffer[]): HubAsyncResult<boolean[]> {
+    return await ResultAsync.fromPromise(rsDbKeysExist(this._db, keys), (e) => rustErrorToHubError(e));
+  }
+
   async get(key: Buffer): Promise<Buffer> {
     const v = await ResultAsync.fromPromise(rsDbGet(this._db, key), (e) => rustErrorToHubError(e));
     if (v.isErr()) {
@@ -181,7 +189,15 @@ class RocksDB {
   }
 
   async commit(tsx: RocksDbTransaction): Promise<void> {
-    return rsDbCommit(this._db, tsx.getKeyValues());
+    return await rsDbCommit(this._db, tsx.getKeyValues());
+  }
+
+  async countKeysAtPrefix(prefix: Buffer): Promise<number> {
+    return await rsDbCountKeysAtPrefix(this._db, prefix);
+  }
+
+  async deleteAllKeysInRange(options: RocksDbIteratorOptions): Promise<boolean> {
+    return await rsDbDeleteAllKeysInRange(this._db, options);
   }
 
   /**
@@ -192,7 +208,7 @@ class RocksDB {
     callback: (key: Buffer, value: Buffer | undefined) => Promise<boolean> | boolean | Promise<void> | void,
     pageOptions: PageOptions = {},
   ): Promise<boolean> {
-    return rsDbForEachIteratorByPrefix(this._db, prefix, pageOptions, callback);
+    return await rsDbForEachIteratorByPrefix(this._db, prefix, pageOptions, callback);
   }
 
   /**
@@ -203,7 +219,7 @@ class RocksDB {
     options: RocksDbIteratorOptions,
     callback: (key: Buffer | undefined, value: Buffer | undefined) => Promise<boolean> | boolean | void,
   ): Promise<boolean> {
-    return rsDbForEachIteratorByOpts(this._db, options, callback);
+    return await rsDbForEachIteratorByOpts(this._db, options, callback);
   }
 
   async approximateSize(): Promise<number> {

@@ -1,23 +1,22 @@
 import { DbStats, FarcasterNetwork, HubAsyncResult, HubError } from "@farcaster/core";
 import { LATEST_DB_SCHEMA_VERSION } from "../storage/db/migrations/migrations.js";
 import axios from "axios";
-import { err, ok, ResultAsync } from "neverthrow";
-import { S3_REGION, SNAPSHOT_S3_DEFAULT_BUCKET } from "../hubble.js";
-import { rsCreateTarGzip, rustErrorToHubError } from "../rustfunctions.js";
-import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { err, ok, Result, ResultAsync } from "neverthrow";
+import { S3_REGION, SNAPSHOT_S3_DOWNLOAD_BUCKET, SNAPSHOT_S3_UPLOAD_BUCKET } from "../hubble.js";
+import { PutObjectCommand, PutObjectCommandInput, S3Client } from "@aws-sdk/client-s3";
 import fs from "fs";
 import { Upload } from "@aws-sdk/lib-storage";
-import { MerkleTrie } from "../network/sync/merkleTrie.js";
 import { logger } from "./logger.js";
 
 export type SnapshotMetadata = Partial<DbStats> & {
-  key: string;
+  keyBase: string;
+  chunks: string[];
   timestamp: number;
   serverDate: string;
 };
 
 export const isValidSnapshotMetadata = (data: Record<string, unknown>): data is SnapshotMetadata => {
-  return data["key"] !== undefined && data["timestamp"] !== undefined && data["serverDate"] !== undefined;
+  return data["keyBase"] !== undefined && data["timestamp"] !== undefined && data["serverDate"] !== undefined;
 };
 
 export const fetchSnapshotMetadata = async (snapshotPrefixURI: string): HubAsyncResult<SnapshotMetadata> => {
@@ -54,10 +53,11 @@ export const snapshotDirectory = (fcNetwork: FarcasterNetwork, prevVersionCounte
   const network = FarcasterNetwork[fcNetwork].toString();
   return `snapshots/${network}/DB_SCHEMA_${LATEST_DB_SCHEMA_VERSION - (prevVersionCounter ?? 0)}`;
 };
+
 export const snapshotURLAndMetadata = async (
   fcNetwork: FarcasterNetwork,
   prevVersionCounter?: number,
-  s3Bucket: string = SNAPSHOT_S3_DEFAULT_BUCKET,
+  s3Bucket: string = SNAPSHOT_S3_DOWNLOAD_BUCKET,
 ): HubAsyncResult<[string, SnapshotMetadata]> => {
   const dirPath = snapshotURL(fcNetwork, prevVersionCounter, s3Bucket);
   const response = await fetchSnapshotMetadata(dirPath);
@@ -65,76 +65,78 @@ export const snapshotURLAndMetadata = async (
     return err(response.error);
   }
   const data: SnapshotMetadata = response.value;
-  return ok([`https://${s3Bucket}/${data.key}`, data]);
+  return ok([`https://${s3Bucket}/${data.keyBase}`, data]);
 };
+
 export const snapshotURL = (
   fcNetwork: FarcasterNetwork,
   prevVersionCounter?: number,
-  s3Bucket: string = SNAPSHOT_S3_DEFAULT_BUCKET,
+  s3Bucket: string = SNAPSHOT_S3_DOWNLOAD_BUCKET,
 ): string => {
   return `https://${s3Bucket}/${snapshotDirectory(fcNetwork, prevVersionCounter)}`;
 };
 
+export const r2Endpoint = (): string => {
+  return process.env["R2_ENDPOINT"] ?? "";
+};
+
 export const uploadToS3 = async (
   fcNetwork: FarcasterNetwork,
-  tarFilePath: string,
-  s3Bucket: string = SNAPSHOT_S3_DEFAULT_BUCKET,
+  chunkedDirPath: string,
+  s3Bucket: string = SNAPSHOT_S3_UPLOAD_BUCKET,
   messageCount?: number,
+  timestamp?: number,
 ): HubAsyncResult<string> => {
-  let start = Date.now();
-  logger.info(
-    {
-      tarFilePath,
-      message_count: messageCount ?? -1,
-    },
-    "Creating tar.gz file ...",
-  );
-
-  // First, gzip the file. Do it in rust, which can run the CPU intensive gzip in a separate thread
-  const gzipResult = await ResultAsync.fromPromise(rsCreateTarGzip(tarFilePath), rustErrorToHubError);
-  if (gzipResult.isErr()) {
-    logger.error({ error: gzipResult.error }, "Error creating tar.gz file");
-    return err(gzipResult.error);
-  }
-
-  logger.info({ timeTakenMs: Date.now() - start, gzipResult }, "Finished creating tar.gz file created");
-  const filePath = gzipResult.value;
+  const startTimestamp = timestamp ?? Date.now();
 
   const s3 = new S3Client({
     region: S3_REGION,
+    endpoint: r2Endpoint(),
+    forcePathStyle: true,
   });
 
   // The AWS key is "snapshots/{network}/{DB_SCHEMA_VERSION}/snapshot-{yyyy-mm-dd}-{timestamp}.tar.gz"
-  const key = `${snapshotDirectory(fcNetwork)}/snapshot-${new Date().toISOString().split("T")[0]}-${Math.floor(
-    Date.now() / 1000,
-  )}.tar.gz`;
+  const keyBase = `${snapshotDirectory(fcNetwork)}/snapshot-${
+    new Date(startTimestamp).toISOString().split("T")[0]
+  }-${Math.floor(startTimestamp / 1000)}.tar.gz`;
 
-  start = Date.now();
-  logger.info({ filePath, key, bucket: s3Bucket }, "Uploading snapshot to S3");
+  logger.info({ chunkedDirPath, keyBase, s3Bucket }, "Uploading snapshot to S3");
 
-  const fileStream = fs.createReadStream(filePath);
-  fileStream.on("error", function (err) {
-    logger.error(`S3 File Error: ${err}`);
-  });
+  // Read all the chunks files in the chunkedDirPath and upload them to S3
 
-  // The targz should be uploaded via multipart upload to S3
-  const targzParams = new Upload({
-    client: s3,
-    params: {
+  // Get all the files in the directory
+  const files = fs.readdirSync(chunkedDirPath);
+  files.sort();
+
+  // Upload each file to S3
+  for (const file of files) {
+    const key = `${keyBase}/${file}`;
+    const filePath = `${chunkedDirPath}/${file}`;
+
+    const fileStream = fs.createReadStream(filePath);
+    fileStream.on("error", function (err) {
+      logger.error(`S3 File Error: ${err}`);
+    });
+
+    // The chunks should be uploaded via multipart upload to S3
+    const chunkUploadParams = {
       Bucket: s3Bucket,
       Key: key,
       Body: fileStream,
-    },
-    queueSize: 4, // 4 concurrent uploads
-    partSize: 1000 * 1024 * 1024, // 1 GB
-  });
+    };
 
-  // NOTE: The sync engine type `DbStats` does not match the type in packages/core used by SnapshotMetadata.
-  //       As a result, ensure keys match core package `DbStats`, NOT sync engine `DbStats`
+    logger.info({ key, filePath }, "Uploading snapshot chunk to S3...");
+    const uploadResult = await uploadChunk(s3, chunkUploadParams, key);
+    if (uploadResult.isErr()) {
+      return err(uploadResult.error);
+    }
+  }
+
   const metadata: SnapshotMetadata = {
-    key,
-    timestamp: Date.now(),
-    serverDate: new Date().toISOString(),
+    keyBase,
+    chunks: files,
+    timestamp: startTimestamp,
+    serverDate: new Date(startTimestamp).toISOString(),
     ...(messageCount && { numMessages: messageCount }),
   };
 
@@ -142,18 +144,49 @@ export const uploadToS3 = async (
     Bucket: s3Bucket,
     Key: `${snapshotDirectory(fcNetwork)}/latest.json`,
     Body: JSON.stringify(metadata, null, 2),
+    ContentType: "application/json",
   };
 
-  targzParams.on("httpUploadProgress", (progress) => {
-    logger.info({ progress }, "Uploading snapshot to S3");
-  });
-
   try {
-    await targzParams.done();
+    logger.info({ latestJsonParams, metadata }, "Preparing latest.json for uploading to S3");
     await s3.send(new PutObjectCommand(latestJsonParams));
-    logger.info({ key, timeTakenMs: Date.now() - start }, "Snapshot uploaded to S3");
-    return ok(key);
+    logger.info({}, "Snapshot latest.json uploaded to S3");
+    return ok(keyBase);
   } catch (e: unknown) {
     return err(new HubError("unavailable.network_failure", (e as Error).message));
   }
 };
+
+const maxRetries = 5;
+const retryDelayMs = 1 * 60 * 1000;
+
+async function uploadChunk(
+  s3: S3Client,
+  chunkUploadParams: PutObjectCommandInput,
+  key: string,
+): Promise<Result<void, HubError>> {
+  let retries = 0;
+
+  while (retries < maxRetries) {
+    try {
+      const startTimestamp = Date.now();
+      await s3.send(new PutObjectCommand(chunkUploadParams));
+      logger.info({ key, timeTakenMs: Date.now() - startTimestamp }, "Snapshot chunk uploaded to S3");
+      return ok(undefined);
+    } catch (e: unknown) {
+      retries++;
+      if (retries < maxRetries) {
+        logger.warn({ key, retries, errMsg: (e as Error)?.message }, "Snapshot chunk upload failed. Retrying...");
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs * retries));
+      } else {
+        logger.error(
+          { key, errMsg: (e as Error)?.message },
+          "Snapshot chunk upload failed after maximum retries. Aborting.",
+        );
+        return err(new HubError("unavailable.network_failure", (e as Error).message));
+      }
+    }
+  }
+
+  return err(new HubError("unavailable.network_failure", "Unknown error"));
+}

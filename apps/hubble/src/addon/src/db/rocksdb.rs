@@ -1,11 +1,13 @@
+use crate::db::multi_chunk_writer::MultiChunkWriter;
 use crate::logger::LOGGER;
 use crate::statsd::statsd;
-use crate::store::{self, get_db, hub_error_to_js_throw, increment_vec_u8, HubError, PageOptions};
-use gzp::{
-    deflate::Gzip,
-    par::compress::{ParCompress, ParCompressBuilder},
-    ZWriter,
+use crate::store::{
+    self, get_db, get_iterator_options, hub_error_to_js_throw, increment_vec_u8, HubError,
+    PageOptions, PAGE_SIZE_MAX,
 };
+use crate::trie::merkle_trie::TRIE_DBPATH_PREFIX;
+use crate::THREAD_POOL;
+use chrono::NaiveDateTime;
 use neon::context::{Context, FunctionContext};
 use neon::handle::Handle;
 use neon::object::Object;
@@ -15,14 +17,17 @@ use neon::types::{
     Finalize, JsArray, JsBoolean, JsBox, JsBuffer, JsFunction, JsNumber, JsObject, JsPromise,
     JsString,
 };
-use rocksdb::{Options, TransactionDB};
-use slog::{info, o};
+use rocksdb::{Options, TransactionDB, WriteBatch, WriteOptions, DB};
+use slog::{info, o, Logger};
+use std::borrow::Borrow;
 use std::collections::HashMap;
-use std::fs::{self, File};
-use std::path::Path;
+use std::fs::{self};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 use tar::Builder;
 use walkdir::WalkDir;
+
+const DB_DIRECTORY: &str = ".rocks";
 
 /** Hold a transaction. List of key/value pairs that will be committed together */
 pub struct RocksDbTransactionBatch {
@@ -110,6 +115,15 @@ impl RocksDB {
         let db = rocksdb::TransactionDB::open(&opts, &tx_db_opts, &self.path)?;
         *db_lock = Some(db);
 
+        // We put the db in a RwLock to make the compiler happy, but it is strictly not required.
+        // We can use unsafe to replace the value directly, and this will work fine, and shave off
+        // 100ns per db read/write operation.
+        // eg:
+        // unsafe {
+        //     let db_ptr = &self.db as *const Option<TransactionDB> as *mut Option<TransactionDB>;
+        //     std::ptr::replace(db_ptr, Some(db));
+        // }
+
         info!(self.logger, "Opened database"; "path" => &self.path);
 
         Ok(())
@@ -126,6 +140,18 @@ impl RocksDB {
             drop(db);
         }
 
+        // See the comment in open(). We strictly don't need to use the RwLock here, but we do it
+        // to make the compiler happy. We could use unsafe to replace the value directly, like this:
+        // if self.db.is_some() {
+        //     let db = unsafe {
+        //         let db_ptr = &self.db as *const Option<TransactionDB> as *mut Option<TransactionDB>;
+        //         std::ptr::replace(db_ptr, None)
+        //     };
+
+        //     // Strictly not needed, but writing so its clear we are dropping the DB here
+        //     db.map(|db| drop(db));
+        // }
+
         Ok(())
     }
 
@@ -133,10 +159,35 @@ impl RocksDB {
         self.close()?;
         let path = Path::new(&self.path);
 
-        rocksdb::DB::destroy(&rocksdb::Options::default(), path).map_err(|e| HubError {
-            code: "db.internal_error".to_string(),
-            message: e.to_string(),
-        })
+        let result =
+            rocksdb::DB::destroy(&rocksdb::Options::default(), path).map_err(|e| HubError {
+                code: "db.internal_error".to_string(),
+                message: e.to_string(),
+            });
+
+        // Also rm -rf the directory, ignore any errors
+        let _ = fs::remove_dir_all(path);
+
+        result
+    }
+
+    pub fn db(&self) -> RwLockReadGuard<'_, Option<TransactionDB>> {
+        self.db.read().unwrap()
+    }
+
+    pub fn keys_exist(&self, keys: &Vec<Vec<u8>>) -> Result<Vec<bool>, HubError> {
+        let db = self.db();
+        let db = db.as_ref().unwrap();
+
+        Ok(db
+            .multi_get(keys)
+            .into_iter()
+            .map(|r| match r {
+                Ok(Some(_)) => true,
+                Ok(None) => false,
+                Err(_) => false,
+            })
+            .collect::<Vec<_>>())
     }
 
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, HubError> {
@@ -144,10 +195,6 @@ impl RocksDB {
             code: "db.internal_error".to_string(),
             message: e.to_string(),
         })
-    }
-
-    pub fn db(&self) -> RwLockReadGuard<'_, Option<TransactionDB>> {
-        self.db.read().unwrap()
     }
 
     pub fn get_many(&self, keys: &Vec<Vec<u8>>) -> Result<Vec<Vec<u8>>, HubError> {
@@ -191,7 +238,7 @@ impl RocksDB {
 
     pub fn commit(&self, batch: RocksDbTransactionBatch) -> Result<(), HubError> {
         let db = self.db();
-        if (*db).is_none() {
+        if db.is_none() {
             return Err(HubError {
                 code: "db.internal_error".to_string(),
                 message: "Database is not open".to_string(),
@@ -201,10 +248,8 @@ impl RocksDB {
         let txn = db.as_ref().unwrap().transaction();
         for (key, value) in batch.batch {
             if value.is_none() {
-                // println!("rust txn is delete, key: {:?}", key);
                 txn.delete(key)?;
             } else {
-                // println!("rust txn is put, key: {:?}", key);
                 txn.put(key, value.unwrap())?;
             }
         }
@@ -275,9 +320,6 @@ impl RocksDB {
             upper_prefix = prefix_end.to_vec();
         }
 
-        // println!("lower_prefix: {:?}", lower_prefix);
-        // println!("upper_prefix: {:?}", upper_prefix);
-
         let mut opts = rocksdb::ReadOptions::default();
         opts.set_iterate_lower_bound(lower_prefix);
         opts.set_iterate_upper_bound(upper_prefix);
@@ -289,10 +331,30 @@ impl RocksDB {
     }
 
     /**
+     * Count the number of keys with a given prefix.
+     */
+    pub fn count_keys_at_prefix(&self, prefix: &[u8]) -> Result<u32, HubError> {
+        let iter_opts = RocksDB::get_iterator_options(prefix, &PageOptions::default());
+
+        let db = self.db();
+        let mut iter = db.as_ref().unwrap().raw_iterator_opt(iter_opts.opts);
+
+        let mut count = 0;
+        iter.seek_to_first();
+        while iter.valid() {
+            count += 1;
+
+            iter.next();
+        }
+
+        Ok(count)
+    }
+
+    /**
      * Iterate over all keys with a given prefix.
      * The callback function should return true to stop the iteration, or false to continue.
      */
-    pub fn for_each_iterator_by_prefix<F>(
+    pub fn for_each_iterator_by_prefix_paged<F>(
         &self,
         prefix: &[u8],
         page_options: &PageOptions,
@@ -314,6 +376,7 @@ impl RocksDB {
 
         let mut all_done = true;
         let mut count = 0;
+
         while iter.valid() {
             if let Some((key, value)) = iter.item() {
                 if f(&key, &value)? {
@@ -323,7 +386,7 @@ impl RocksDB {
                 if page_options.page_size.is_some() {
                     count += 1;
                     if count >= page_options.page_size.unwrap() {
-                        all_done = false;
+                        all_done = true;
                         break;
                     }
                 }
@@ -341,7 +404,7 @@ impl RocksDB {
 
     // Same as for_each_iterator_by_prefix above, but does not limit by page size. To be used in
     // cases where higher level callers are doing custom filtering
-    pub fn for_each_iterator_by_prefix_unbounded<F>(
+    pub fn for_each_iterator_by_prefix<F>(
         &self,
         prefix: &[u8],
         page_options: &PageOptions,
@@ -355,7 +418,10 @@ impl RocksDB {
             page_token: page_options.page_token.clone(),
             reverse: page_options.reverse,
         };
-        self.for_each_iterator_by_prefix(prefix, &unbounded_page_options, f)
+
+        let all_done =
+            self.for_each_iterator_by_prefix_paged(prefix, &unbounded_page_options, f)?;
+        Ok(all_done)
     }
 
     /**
@@ -470,69 +536,6 @@ impl RocksDB {
             .map(|metadata| metadata.len()) // Extract the file size.
             .sum() // Sum the sizes.
     }
-
-    pub fn create_tar_backup(&self, input_dir: &str) -> Result<String, HubError> {
-        if self.db.read().unwrap().is_some() {
-            return Err(HubError {
-                code: "db.open".to_string(),
-                message: "Can't create a Tar backup while DB is open".to_string(),
-            });
-        }
-
-        let base_name = Path::new(input_dir)
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or(".".to_string());
-
-        let output_file_path = format!(
-            "{}-{}.tar",
-            input_dir,
-            chrono::Local::now().format("%Y-%m-%d-%s")
-        );
-
-        let start = std::time::SystemTime::now();
-        info!(self.logger, "Creating tarball for directory: {}", input_dir; 
-            o!("output_file_path" => &output_file_path, "base_name" => &base_name));
-
-        let tar_file = File::create(&output_file_path)?;
-        let mut tar = Builder::new(tar_file);
-
-        tar.append_dir_all(base_name, input_dir)?;
-
-        tar.finish()?;
-
-        let metadata = fs::metadata(&output_file_path)?;
-        let time_taken = start.elapsed().expect("Time went backwards");
-
-        info!(
-            self.logger,
-            "Tarball created: path = {}, size = {} bytes, time taken = {:?}",
-            output_file_path,
-            metadata.len(),
-            time_taken
-        );
-
-        Ok(output_file_path)
-    }
-
-    pub fn create_tar_gzip(input_tar: &str) -> Result<String, HubError> {
-        let output_gz_path = format!("{}.gz", input_tar);
-
-        let mut tar_file = File::open(input_tar)?;
-        let gz_file = File::create(&output_gz_path)?;
-        // let mut gz_encoder = GzEncoder::new(gz_file, Compression::default());
-        let mut parz: ParCompress<Gzip> = ParCompressBuilder::new().from_writer(gz_file);
-
-        std::io::copy(&mut tar_file, &mut parz)?;
-
-        parz.finish().map_err(|e| HubError {
-            code: "db.internal_error".to_string(),
-            message: format!("Error creating gzip file: {}", e.to_string()),
-        })?;
-        fs::remove_file(input_tar)?;
-
-        Ok(output_gz_path)
-    }
 }
 
 impl RocksDB {
@@ -563,45 +566,6 @@ impl RocksDB {
         let result = db.approximate_size();
 
         Ok(cx.number(result as f64))
-    }
-
-    pub fn js_create_tar_backup(mut cx: FunctionContext) -> JsResult<JsPromise> {
-        let db = get_db(&mut cx)?;
-        let input_dir = db.location();
-
-        let channel = cx.channel();
-        let (deferred, promise) = cx.promise();
-
-        // Spawn a new thread to create the tarball
-        std::thread::spawn(move || {
-            let result = db.create_tar_backup(&input_dir);
-
-            deferred.settle_with(&channel, move |mut tcx| match result {
-                Ok(output_path) => Ok(tcx.string(output_path)),
-                Err(e) => hub_error_to_js_throw(&mut tcx, e),
-            });
-        });
-
-        Ok(promise)
-    }
-
-    pub fn js_create_tar_gzip(mut cx: FunctionContext) -> JsResult<JsPromise> {
-        let input_tar = cx.argument::<JsString>(0)?.value(&mut cx);
-
-        let channel = cx.channel();
-        let (deferred, promise) = cx.promise();
-
-        // Spawn a new thread to create the tarball
-        std::thread::spawn(move || {
-            let result = RocksDB::create_tar_gzip(&input_tar);
-
-            deferred.settle_with(&channel, move |mut tcx| match result {
-                Ok(output_path) => Ok(tcx.string(output_path)),
-                Err(e) => hub_error_to_js_throw(&mut tcx, e),
-            });
-        });
-
-        Ok(promise)
     }
 
     pub fn js_clear(mut cx: FunctionContext) -> JsResult<JsNumber> {
@@ -660,6 +624,40 @@ impl RocksDB {
         Ok(promise)
     }
 
+    pub fn js_keys_exist(mut cx: FunctionContext) -> JsResult<JsPromise> {
+        let db = get_db(&mut cx)?;
+        let keys = cx.argument::<JsArray>(0)?;
+
+        let mut key_vec = Vec::new();
+        for i in 0..keys.len(&mut cx) {
+            let key = keys
+                .get::<JsBuffer, _, u32>(&mut cx, i)?
+                .downcast_or_throw::<JsBuffer, _>(&mut cx)?;
+            key_vec.push(key.as_slice(&cx).to_vec());
+        }
+
+        let channel = cx.channel();
+        let (deferred, promise) = cx.promise();
+        THREAD_POOL.lock().unwrap().execute(move || {
+            let result = db.keys_exist(&key_vec);
+
+            deferred.settle_with(&channel, move |mut cx| match result {
+                Ok(exists) => {
+                    let js_array = JsArray::new(&mut cx, exists.len());
+                    for (i, value) in exists.iter().enumerate() {
+                        let val = cx.boolean(*value);
+                        js_array.set(&mut cx, i as u32, val)?;
+                    }
+
+                    Ok(js_array)
+                }
+                Err(e) => hub_error_to_js_throw(&mut cx, e),
+            });
+        });
+
+        Ok(promise)
+    }
+
     pub fn js_get(mut cx: FunctionContext) -> JsResult<JsBuffer> {
         let db = get_db(&mut cx)?;
         let key = cx.argument::<JsBuffer>(0)?.as_slice(&cx).to_vec();
@@ -696,23 +694,28 @@ impl RocksDB {
             key_vec.push(key.as_slice(&cx).to_vec());
         }
 
-        let result = match db.get_many(&key_vec) {
-            Ok(result) => result,
-            Err(e) => return hub_error_to_js_throw(&mut cx, e),
-        };
-
         let channel = cx.channel();
         let (deferred, promise) = cx.promise();
-        deferred.settle_with(&channel, move |mut cx| {
-            let js_array = JsArray::new(&mut cx, result.len());
-            for (i, value) in result.iter().enumerate() {
-                let mut buffer = cx.buffer(value.len())?;
-                let target = buffer.as_mut_slice(&mut cx);
-                target.copy_from_slice(&value);
-                js_array.set(&mut cx, i as u32, buffer)?;
-            }
 
-            Ok(js_array)
+        THREAD_POOL.lock().unwrap().execute(move || {
+            let result = db.get_many(&key_vec);
+
+            deferred.settle_with(&channel, move |mut cx| {
+                let result = match result {
+                    Ok(r) => r,
+                    Err(e) => return hub_error_to_js_throw(&mut cx, e),
+                };
+
+                let js_array = JsArray::new(&mut cx, result.len());
+                for (i, value) in result.iter().enumerate() {
+                    let mut buffer = cx.buffer(value.len())?;
+                    let target = buffer.as_mut_slice(&mut cx);
+                    target.copy_from_slice(&value);
+                    js_array.set(&mut cx, i as u32, buffer)?;
+                }
+
+                Ok(js_array)
+            });
         });
 
         Ok(promise)
@@ -820,6 +823,94 @@ impl RocksDB {
         Ok(result)
     }
 
+    pub fn js_count_keys_at_prefix(mut cx: FunctionContext) -> JsResult<JsPromise> {
+        let db = get_db(&mut cx)?;
+
+        // Prefix
+        let prefix = cx.argument::<JsBuffer>(0)?.as_slice(&cx).to_vec();
+
+        let channel = cx.channel();
+        let (deferred, promise) = cx.promise();
+        THREAD_POOL.lock().unwrap().execute(move || {
+            let result = db.count_keys_at_prefix(&prefix);
+            deferred.settle_with(&channel, move |mut cx| {
+                let result = match result {
+                    Ok(r) => r,
+                    Err(e) => return hub_error_to_js_throw(&mut cx, e),
+                };
+
+                Ok(cx.number(result as f64))
+            });
+        });
+
+        Ok(promise)
+    }
+
+    /**
+     * Bulk fetch a page of keys with a given prefix with the given page options.
+     */
+    pub fn js_fetch_iterator_page_by_prefix(mut cx: FunctionContext) -> JsResult<JsPromise> {
+        let db = get_db(&mut cx)?;
+
+        // Prefix
+        let prefix = cx.argument::<JsBuffer>(0)?.as_slice(&cx).to_vec();
+
+        // Page options
+        let page_options = store::get_page_options(&mut cx, 1)?;
+
+        let channel = cx.channel();
+        let (deferred, promise) = cx.promise();
+        THREAD_POOL.lock().unwrap().execute(move || {
+            let mut results = Vec::new();
+            let mut next_page_token = Vec::new();
+
+            let iter_result =
+                db.for_each_iterator_by_prefix_paged(&prefix, &page_options, |key, value| {
+                    results.push((key.to_vec(), value.to_vec()));
+                    if results.len() > PAGE_SIZE_MAX {
+                        next_page_token = key[prefix.len()..].to_vec();
+                        return Ok(true);
+                    }
+                    Ok(false)
+                });
+
+            deferred.settle_with(&channel, move |mut cx| match iter_result {
+                Err(e) => hub_error_to_js_throw(&mut cx, e),
+                Ok(all_done) => {
+                    let js_array = JsArray::new(&mut cx, results.len());
+                    for (i, (key, value)) in results.iter().enumerate() {
+                        let js_object = JsObject::new(&mut cx);
+                        let mut key_buffer = cx.buffer(key.len())?;
+                        key_buffer.as_mut_slice(&mut cx).copy_from_slice(key);
+                        js_object.set(&mut cx, "key", key_buffer)?;
+
+                        let mut value_buffer = cx.buffer(value.len())?;
+                        value_buffer.as_mut_slice(&mut cx).copy_from_slice(value);
+                        js_object.set(&mut cx, "value", value_buffer)?;
+
+                        js_array.set(&mut cx, i as u32, js_object)?;
+                    }
+
+                    let js_object = JsObject::new(&mut cx);
+                    let js_all_done = cx.boolean(all_done);
+
+                    let mut js_next_page_token = cx.buffer(next_page_token.len())?;
+                    js_next_page_token
+                        .as_mut_slice(&mut cx)
+                        .copy_from_slice(&next_page_token);
+
+                    js_object.set(&mut cx, "allFinished", js_all_done)?;
+                    js_object.set(&mut cx, "nextPageToken", js_next_page_token)?;
+                    js_object.set(&mut cx, "dbKeyValues", js_array)?;
+
+                    Ok(js_object)
+                }
+            });
+        });
+
+        Ok(promise)
+    }
+
     pub fn js_for_each_iterator_by_prefix(mut cx: FunctionContext) -> JsResult<JsPromise> {
         let db = get_db(&mut cx)?;
 
@@ -832,7 +923,7 @@ impl RocksDB {
         // The argument is a callback function
         let callback = cx.argument::<JsFunction>(2)?;
 
-        let result = db.for_each_iterator_by_prefix(&prefix, &page_options, |key, value| {
+        let result = db.for_each_iterator_by_prefix_paged(&prefix, &page_options, |key, value| {
             // Use the extracted function here
             Self::call_js_callback(&mut cx, &callback, key, value)
         });
@@ -851,30 +942,8 @@ impl RocksDB {
     pub fn js_for_each_iterator_by_js_opts(mut cx: FunctionContext) -> JsResult<JsPromise> {
         let db = get_db(&mut cx)?;
 
-        // Page options
-        let js_opts = cx.argument::<JsObject>(0)?;
-        let reverse = js_opts
-            .get_opt::<JsBoolean, _, _>(&mut cx, "reverse")?
-            .map_or(false, |js_boolean| js_boolean.value(&mut cx));
-        let gte = match js_opts.get_opt::<JsBuffer, _, _>(&mut cx, "gte")? {
-            Some(buffer) => Some(buffer.as_slice(&cx).to_vec()),
-            None => None,
-        };
-        let gt = match js_opts.get_opt::<JsBuffer, _, _>(&mut cx, "gt")? {
-            Some(buffer) => Some(buffer.as_slice(&cx).to_vec()),
-            None => None,
-        };
-        let lt = js_opts
-            .get::<JsBuffer, _, _>(&mut cx, "lt")?
-            .as_slice(&cx)
-            .to_vec();
-
-        let js_opts = JsIteratorOptions {
-            reverse,
-            gte,
-            gt,
-            lt,
-        };
+        // JS Iterator optionsoptions
+        let js_opts = get_iterator_options(&mut cx, 0)?;
 
         // The argument is a callback function
         let callback = cx.argument::<JsFunction>(1)?;
@@ -891,6 +960,247 @@ impl RocksDB {
         let channel = cx.channel();
         let (deferred, promise) = cx.promise();
         deferred.settle_with(&channel, move |mut cx| Ok(cx.boolean(result.unwrap())));
+
+        Ok(promise)
+    }
+
+    pub fn js_delete_all_keys_in_range(mut cx: FunctionContext) -> JsResult<JsPromise> {
+        let db = get_db(&mut cx)?;
+
+        // JS Iterator optionsoptions
+        let js_opts = get_iterator_options(&mut cx, 0)?;
+
+        let channel = cx.channel();
+        let (deferred, promise) = cx.promise();
+
+        THREAD_POOL.lock().unwrap().execute(move || {
+            // Delete all keys in the range
+            let result =
+                db.for_each_iterator_by_jsopts(js_opts, |key, _| db.del(key).map(|_| false));
+
+            deferred.settle_with(&channel, move |mut cx| match result {
+                Ok(r) => Ok(cx.boolean(r)),
+                Err(e) => return hub_error_to_js_throw(&mut cx, e),
+            });
+        });
+
+        Ok(promise)
+    }
+}
+
+impl RocksDB {
+    fn create_tar_gzip(
+        logger: &Logger,
+        input_dir: &str,
+        timestamp: NaiveDateTime,
+    ) -> Result<String, HubError> {
+        let base_name = Path::new(input_dir)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or("rocks.hub._default".to_string());
+
+        let chunked_output_dir = Path::new(DB_DIRECTORY)
+            .join(format!(
+                "{}-{}.tar.gz",
+                base_name,
+                timestamp.format("%Y-%m-%d-%s")
+            ))
+            .as_os_str()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let start = std::time::SystemTime::now();
+        info!(logger, "Creating chunked tar.gz snapshot for directory: {}", 
+            input_dir; o!("output_file_path" => &chunked_output_dir, "base_name" => &base_name));
+
+        let mut multi_chunk_writer = MultiChunkWriter::new(
+            PathBuf::from(chunked_output_dir.clone()),
+            4 * 1024 * 1024 * 1024, // 4GB
+        );
+
+        let mut tar = Builder::new(&mut multi_chunk_writer);
+        tar.append_dir_all(base_name, input_dir)?;
+        tar.finish()?;
+        drop(tar); // Needed so we can call multi_chunk_writer.finish() next
+        multi_chunk_writer.finish()?;
+
+        let metadata = fs::metadata(&chunked_output_dir)?;
+        let time_taken = start.elapsed().expect("Time went backwards");
+        info!(
+            logger,
+            "Created chunked tar.gz archive for snapshot: path = {}, size = {} bytes, time taken = {:?}",
+            chunked_output_dir,
+            metadata.len(),
+            time_taken
+        );
+
+        Ok(chunked_output_dir)
+    }
+
+    fn snapshot_backup(
+        main_db: Arc<RocksDB>,
+        trie_db: Arc<RocksDB>,
+        timestamp_ms: i64,
+    ) -> Result<String, HubError> {
+        let snapshot_logger = LOGGER.new(o! ("component" => "RocksDBSnapshotBackup"));
+        let main_db_path = main_db.location();
+
+        let timestamp = chrono::NaiveDateTime::from_timestamp_millis(timestamp_ms)
+            .unwrap_or(chrono::Utc::now().naive_utc());
+
+        let main_backup_path = Path::new(&format!(
+            "{}-{}.backup",
+            main_db_path,
+            timestamp.format("%Y-%m-%d-%s")
+        ))
+        .join("rocks.hub._default");
+
+        // rm -rf this path if it exists
+        if main_backup_path.exists() {
+            fs::remove_dir_all(&main_backup_path).map_err(|e| HubError {
+                code: "db.internal_error".to_string(),
+                message: e.to_string(),
+            })?;
+        }
+
+        let triedb_backup_path = main_backup_path.join(TRIE_DBPATH_PREFIX);
+
+        let main_backup_path = main_backup_path.into_os_string().into_string().unwrap();
+        let triedb_backup_path = triedb_backup_path.into_os_string().into_string().unwrap();
+
+        let start = std::time::SystemTime::now();
+        info!(snapshot_logger, "Creating snapshot for main DB: {}", main_db_path; 
+        o!("output_file_path_main" => &main_backup_path, "output_file_path_trie" => &triedb_backup_path));
+
+        let backup_main = DB::open_default(&main_backup_path)
+            .map_err(|e| HubError::internal_db_error(&e.to_string()))?;
+        // Prepare write options to disable WAL
+        let mut write_opts = WriteOptions::default();
+        write_opts.disable_wal(true);
+        let mut write_batch = WriteBatch::default();
+
+        let backup_trie = DB::open_default(&triedb_backup_path)
+            .map_err(|e| HubError::internal_db_error(&e.to_string()))?;
+
+        let logger = snapshot_logger.clone();
+        let main_backup_thread = std::thread::spawn(move || {
+            let main_db = main_db.db();
+            let main_db_snapshot = main_db.as_ref().unwrap().snapshot();
+
+            let iterator = main_db_snapshot.iterator(rocksdb::IteratorMode::Start);
+            let mut count = 0;
+            for item in iterator {
+                let (key, value) = item.unwrap();
+                write_batch.put(key, value);
+                if write_batch.len() >= 10_000 {
+                    backup_main.write_opt(write_batch, &write_opts).unwrap();
+                    write_batch = WriteBatch::default();
+                }
+
+                count += 1;
+                if count % 1_000_000 == 0 {
+                    backup_main.flush().unwrap();
+                    info!(
+                        logger,
+                        "mainDb Snapshot backup progress: {}M keys",
+                        count / 1_000_000
+                    );
+                }
+            }
+
+            // write any leftover keys
+            backup_main.write_opt(write_batch, &write_opts).unwrap();
+
+            info!(logger, "mainDB Snapshot backup completed: {}", count);
+            drop(main_db_snapshot);
+            drop(backup_main);
+        });
+
+        let logger = snapshot_logger.clone();
+        // Prepare write options to disable WAL
+        let mut write_opts = WriteOptions::default();
+        write_opts.disable_wal(true);
+        let mut write_batch = WriteBatch::default();
+
+        let trie_backup_thread = std::thread::spawn(move || {
+            let trie_db = trie_db.db();
+            let trie_db_snapshot = trie_db.as_ref().unwrap().snapshot();
+
+            let iterator = trie_db_snapshot.iterator(rocksdb::IteratorMode::Start);
+            let mut count = 0;
+            for item in iterator {
+                let (key, value) = item.unwrap();
+                write_batch.put(key, value);
+                if write_batch.len() >= 10_000 {
+                    backup_trie.write_opt(write_batch, &write_opts).unwrap();
+                    write_batch = WriteBatch::default();
+                }
+
+                count += 1;
+                if count % 1_000_000 == 0 {
+                    backup_trie.flush().unwrap();
+                    info!(
+                        logger,
+                        "trieDb Snapshot backup progress: {}M keys",
+                        count / 1_000_000
+                    );
+                }
+            }
+
+            // write any leftover keys
+            backup_trie.write_opt(write_batch, &write_opts).unwrap();
+
+            info!(logger, "trieDB Snapshot backup completed: {}", count);
+            drop(trie_db_snapshot);
+            drop(backup_trie);
+        });
+
+        main_backup_thread.join().unwrap();
+        trie_backup_thread.join().unwrap();
+
+        info!(
+            snapshot_logger,
+            "Full DB Snapshot Backup created: path = {}, time taken = {:?}",
+            main_backup_path,
+            start.elapsed().expect("Time went backwards")
+        );
+
+        let tar_gz_path = Self::create_tar_gzip(&snapshot_logger, &main_backup_path, timestamp)?;
+        info!(
+            snapshot_logger,
+            "Full DB Snapshot Backup tar.gz created: path = {}", tar_gz_path,
+        );
+
+        // rm -rf the backup path
+        fs::remove_dir_all(&main_backup_path).map_err(|e| HubError {
+            code: "db.internal_error".to_string(),
+            message: e.to_string(),
+        })?;
+
+        Ok(tar_gz_path)
+    }
+
+    pub fn js_snapshot_backup(mut cx: FunctionContext) -> JsResult<JsPromise> {
+        let main_db_handle = cx.argument::<JsBox<Arc<RocksDB>>>(0)?;
+        let main_db = (**main_db_handle.borrow()).clone();
+        let trie_db_handle = cx.argument::<JsBox<Arc<RocksDB>>>(1)?;
+        let trie_db = (**trie_db_handle.borrow()).clone();
+
+        let timestamp_ms = cx.argument::<JsNumber>(2)?.value(&mut cx) as i64;
+
+        let channel = cx.channel();
+        let (deferred, promise) = cx.promise();
+
+        // Spawn a new thread to create the tarball
+        std::thread::spawn(move || {
+            let result = Self::snapshot_backup(main_db, trie_db, timestamp_ms);
+
+            deferred.settle_with(&channel, move |mut tcx| match result {
+                Ok(output_path) => Ok(tcx.string(output_path)),
+                Err(e) => hub_error_to_js_throw(&mut tcx, e),
+            });
+        });
 
         Ok(promise)
     }
@@ -1005,5 +1315,96 @@ mod tests {
             b"value4_new".to_vec()
         );
         assert_eq!(txn1.batch.get(&b"key5".to_vec()).unwrap().is_none(), true);
+    }
+
+    #[test]
+    fn test_count_keys_at_prefix() {
+        let tmp_path = tempfile::tempdir()
+            .unwrap()
+            .path()
+            .as_os_str()
+            .to_string_lossy()
+            .to_string();
+        let db = crate::db::RocksDB::new(&tmp_path).unwrap();
+        db.open().unwrap();
+
+        // Add some keys
+        db.put(b"key100", b"value1").unwrap();
+        db.put(b"key101", b"value3").unwrap();
+        db.put(b"key104", b"value4").unwrap();
+        db.put(b"key200", b"value2").unwrap();
+
+        // Count all keys
+        let count = db.count_keys_at_prefix(b"key");
+        assert_eq!(count.unwrap(), 4);
+
+        // Count keys at prefix
+        let count = db.count_keys_at_prefix(b"key1");
+        assert_eq!(count.unwrap(), 3);
+
+        // Count keys at prefix with a specific prefix that doesn't exist
+        let count = db.count_keys_at_prefix(b"key11");
+        assert_eq!(count.unwrap(), 0);
+
+        // Count keys at prefix with a specific sub prefix
+        let count = db.count_keys_at_prefix(b"key10");
+        assert_eq!(count.unwrap(), 3);
+
+        // Count keys at prefix with a specific prefix
+        let count = db.count_keys_at_prefix(b"key200");
+        assert_eq!(count.unwrap(), 1);
+
+        // Count keys at prefix with a specific prefix that doesn't exist
+        let count = db.count_keys_at_prefix(b"key201");
+        assert_eq!(count.unwrap(), 0);
+
+        // Cleanup
+        db.destroy().unwrap();
+    }
+
+    #[test]
+    fn test_keys_exist_in_db() {
+        let tmp_path = tempfile::tempdir()
+            .unwrap()
+            .path()
+            .as_os_str()
+            .to_string_lossy()
+            .to_string();
+        let db = crate::db::RocksDB::new(&tmp_path).unwrap();
+        db.open().unwrap();
+
+        // Add some keys
+        db.put(b"key100", b"value1").unwrap();
+        db.put(b"key101", b"value3").unwrap();
+        db.put(b"key104", b"value4").unwrap();
+        db.put(b"key200", b"value2").unwrap();
+
+        // Check if keys exist
+        let exists = db.keys_exist(&vec![b"key100".to_vec(), b"key101".to_vec()]);
+        assert_eq!(exists.unwrap(), vec![true, true]);
+
+        // Check if keys exist with a key that doesn't exist
+        let exists = db.keys_exist(&vec![
+            b"key100".to_vec(),
+            b"key101".to_vec(),
+            b"key102".to_vec(),
+        ]);
+        assert_eq!(exists.unwrap(), vec![true, true, false]);
+
+        // Check if keys exist with a key that doesn't exist
+        let exists = db.keys_exist(&vec![
+            b"key100".to_vec(),
+            b"key101".to_vec(),
+            b"key102".to_vec(),
+            b"key200".to_vec(),
+        ]);
+        assert_eq!(exists.unwrap(), vec![true, true, false, true]);
+
+        // No keys should return an empty array
+        let exists = db.keys_exist(&vec![]);
+        assert_eq!(exists.unwrap().len(), 0);
+
+        // Cleanup
+        db.destroy().unwrap();
     }
 }

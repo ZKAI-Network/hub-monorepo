@@ -1,15 +1,16 @@
 use super::{
-    hub_error_to_js_throw, make_cast_id_key, make_fid_key, make_user_key, message,
+    deferred_settle_messages, hub_error_to_js_throw, make_cast_id_key, make_fid_key, make_user_key,
+    message,
     store::{Store, StoreDef},
-    utils::{encode_messages_to_js_object, get_page_options, get_store},
+    utils::{get_page_options, get_store},
     HubError, IntoU8, MessagesPage, PageOptions, RootPrefix, StoreEventHandler, UserPostfix,
     PAGE_SIZE_MAX, TS_HASH_LENGTH,
 };
-use crate::protos::message_data;
 use crate::{
     db::{RocksDB, RocksDbTransactionBatch},
     protos::{self, reaction_body::Target, Message, MessageType, ReactionBody, ReactionType},
 };
+use crate::{protos::message_data, THREAD_POOL};
 use neon::{
     context::{Context, FunctionContext},
     result::JsResult,
@@ -47,6 +48,14 @@ impl StoreDef for ReactionStoreDef {
             && message.data.is_some()
             && message.data.as_ref().unwrap().r#type == MessageType::ReactionRemove as i32
             && message.data.as_ref().unwrap().body.is_some()
+    }
+
+    fn compact_state_message_type(&self) -> u8 {
+        MessageType::None as u8
+    }
+
+    fn is_compact_state_type(&self, _message: &Message) -> bool {
+        false
     }
 
     fn build_secondary_indices(
@@ -127,6 +136,13 @@ impl StoreDef for ReactionStoreDef {
             reaction_body.r#type,
             reaction_body.target.as_ref(),
         )
+    }
+
+    fn make_compact_state_add_key(&self, _message: &Message) -> Result<Vec<u8>, HubError> {
+        Err(HubError {
+            code: "bad_request.invalid_param".to_string(),
+            message: "Reaction Store doesn't support compact state".to_string(),
+        })
     }
 
     fn get_prune_size_limit(&self) -> u32 {
@@ -454,17 +470,14 @@ impl ReactionStore {
         let reaction_type = cx.argument::<JsNumber>(1).unwrap().value(&mut cx) as i32;
 
         let page_options = get_page_options(&mut cx, 2)?;
-
-        let messages =
-            match Self::get_reaction_adds_by_fid(&store, fid, reaction_type, &page_options) {
-                Ok(messages) => messages,
-                Err(e) => return hub_error_to_js_throw(&mut cx, e),
-            };
-
         let channel = cx.channel();
         let (deferred, promise) = cx.promise();
-        deferred.settle_with(&channel, move |mut cx| {
-            encode_messages_to_js_object(&mut cx, messages)
+
+        THREAD_POOL.lock().unwrap().execute(move || {
+            let messages =
+                ReactionStore::get_reaction_adds_by_fid(&store, fid, reaction_type, &page_options);
+
+            deferred_settle_messages(deferred, &channel, messages);
         });
 
         Ok(promise)
@@ -500,21 +513,18 @@ impl ReactionStore {
         let reaction_type = cx.argument::<JsNumber>(1).unwrap().value(&mut cx) as i32;
 
         let page_options = get_page_options(&mut cx, 2)?;
-
-        let messages = match ReactionStore::get_reaction_removes_by_fid(
-            &store,
-            fid,
-            reaction_type,
-            &page_options,
-        ) {
-            Ok(messages) => messages,
-            Err(e) => return hub_error_to_js_throw(&mut cx, e),
-        };
-
         let channel = cx.channel();
         let (deferred, promise) = cx.promise();
-        deferred.settle_with(&channel, move |mut cx| {
-            encode_messages_to_js_object(&mut cx, messages)
+
+        THREAD_POOL.lock().unwrap().execute(move || {
+            let messages = ReactionStore::get_reaction_removes_by_fid(
+                &store,
+                fid,
+                reaction_type,
+                &page_options,
+            );
+
+            deferred_settle_messages(deferred, &channel, messages);
         });
 
         Ok(promise)
@@ -533,7 +543,7 @@ impl ReactionStore {
 
         store
             .db()
-            .for_each_iterator_by_prefix_unbounded(&prefix, page_options, |key, value| {
+            .for_each_iterator_by_prefix(&prefix, page_options, |key, value| {
                 if reaction_type == ReactionType::None as i32
                     || (value.len() == 1 && value[0] == reaction_type as u8)
                 {
@@ -561,7 +571,8 @@ impl ReactionStore {
                 Ok(false) // Continue iterating
             })?;
 
-        let messages = message::get_many_messages(store.db().borrow(), message_keys)?;
+        let messages_bytes =
+            message::get_many_messages_as_bytes(store.db().borrow(), message_keys)?;
         let next_page_token = if last_key.len() > 0 {
             Some(last_key[prefix.len()..].to_vec())
         } else {
@@ -569,7 +580,7 @@ impl ReactionStore {
         };
 
         Ok(MessagesPage {
-            messages,
+            messages_bytes,
             next_page_token,
         })
     }
@@ -607,20 +618,18 @@ impl ReactionStore {
 
         let page_options = get_page_options(&mut cx, 3)?;
 
-        let messages = match ReactionStore::get_reactions_by_target(
-            &store,
-            &target,
-            reaction_type,
-            &page_options,
-        ) {
-            Ok(messages) => messages,
-            Err(e) => return hub_error_to_js_throw(&mut cx, e),
-        };
-
         let channel = cx.channel();
         let (deferred, promise) = cx.promise();
-        deferred.settle_with(&channel, move |mut cx| {
-            encode_messages_to_js_object(&mut cx, messages)
+
+        THREAD_POOL.lock().unwrap().execute(move || {
+            let messages = ReactionStore::get_reactions_by_target(
+                &store,
+                &target,
+                reaction_type,
+                &page_options,
+            );
+
+            deferred_settle_messages(deferred, &channel, messages);
         });
 
         Ok(promise)

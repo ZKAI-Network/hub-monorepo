@@ -1,5 +1,24 @@
 # @farcaster/core
 
+## 0.14.11
+
+### Patch Changes
+
+- ab9258af: feat: extend verification signature max length
+- 7b374890: feat: Add Link CompactStateMessage type for link compaction
+
+## 0.14.10
+
+### Patch Changes
+
+- 4c9fb617: feat: allow sharding event stream by fid
+
+## 0.14.9
+
+### Patch Changes
+
+- 5ca5a4a5: feat: Add gossip MessageBundles
+
 ## 0.14.8
 
 ### Patch Changes

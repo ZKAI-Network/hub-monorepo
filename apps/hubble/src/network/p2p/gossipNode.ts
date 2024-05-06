@@ -10,6 +10,7 @@ import {
   HubErrorCode,
   HubResult,
   Message,
+  MessageBundle,
 } from "@farcaster/hub-nodejs";
 import { Connection } from "@libp2p/interface-connection";
 import { PeerId } from "@libp2p/interface-peer-id";
@@ -22,7 +23,8 @@ import { PeriodicPeerCheckScheduler } from "./periodicPeerCheck.js";
 import { GOSSIP_PROTOCOL_VERSION } from "./protocol.js";
 import { AddrInfo } from "@chainsafe/libp2p-gossipsub/types";
 import { PeerScoreThresholds } from "@chainsafe/libp2p-gossipsub/score";
-import { statsd, StatsDInitParams } from "../../utils/statsd.js";
+import { statsd } from "../../utils/statsd.js";
+import { ClientOptions } from "@figma/hot-shots";
 import { createFromProtobuf, exportToProtobuf } from "@libp2p/peer-id-factory";
 import EventEmitter from "events";
 import RocksDB from "../../storage/db/rocksdb.js";
@@ -30,7 +32,7 @@ import { RootPrefix } from "../../storage/db/types.js";
 import { sleep } from "../../utils/crypto.js";
 
 /** The maximum number of pending merge messages before we drop new incoming gossip or sync messages. */
-export const MAX_MESSAGE_QUEUE_SIZE = 100_000;
+export const MAX_SYNCTRIE_QUEUE_SIZE = 100_000;
 /** The TTL for messages in the seen cache */
 export const GOSSIP_SEEN_TTL = 1000 * 60 * 5;
 
@@ -79,8 +81,12 @@ export interface NodeOptions {
   /** The maximum amount of time to dial a peer in libp2p network in milliseconds */
   p2pConnectTimeoutMs?: number | undefined;
   /** StatsD parameters */
-  statsdParams?: StatsDInitParams | undefined;
+  statsdParams?: ClientOptions | undefined;
 }
+
+export type GossipMessageResult = {
+  bundled: boolean;
+} & PublishResult;
 
 // A common return type for several methods on the libp2p node.
 // Includes a success flag, an error message and an optional error type
@@ -108,7 +114,11 @@ export interface LibP2PNodeInterface {
   updateAllowedPeerIds: (peerIds: string[] | undefined) => Promise<void>;
   updateDeniedPeerIds: (peerIds: string[]) => Promise<void>;
   subscribe: (topic: string) => Promise<void>;
-  gossipMessage: (message: Uint8Array) => Promise<SuccessOrError & { peerIds: Uint8Array[] }>;
+  broadcastMessage: (message: Uint8Array) => Promise<SuccessOrError & { peerIds: Uint8Array[] }>;
+  gossipMessage: (
+    message: Uint8Array,
+  ) => Promise<SuccessOrError & { bundled: boolean | undefined; peerIds: Uint8Array[] }>;
+  gossipBundle: (messages: Uint8Array) => Promise<SuccessOrError & { peerIds: Uint8Array[] }>;
   gossipContactInfo: (contactInfo: Uint8Array) => Promise<SuccessOrError & { peerIds: Uint8Array[] }>;
   reportValid: (messageId: string, propagationSource: Uint8Array, isValid: boolean) => Promise<void>;
   updateApplicationPeerScore: (peerId: string, score: number) => Promise<void>;
@@ -282,7 +292,7 @@ export class GossipNode extends TypedEmitter<NodeEvents> {
       if (result.isOk()) {
         log.info({ peerIdStr, addr }, "Connected to peer from DB");
       } else {
-        log.warn({ peerIdStr, addr, error: result.error }, "Failed to connect to peer from DB");
+        log.debug({ peerIdStr, addr, error: result.error }, "Failed to connect to peer from DB");
       }
 
       // Sleep for a bit to avoid overwhelming the network
@@ -390,9 +400,48 @@ export class GossipNode extends TypedEmitter<NodeEvents> {
     return this._peerId?.toString();
   }
 
-  /** Serializes and publishes a Farcaster Message to the network */
-  async gossipMessage(message: Message): Promise<HubResult<PublishResult>> {
+  /** Serializes and publishes a Farcaster Message to the network. This message is gossiped individually
+   *  (i.e., not in a bundle). Do not use this method at scale, since it will cause a lot of traffic
+   *  on the network.
+   *
+   *  Prefer using `gossipMessage` or `gossipBundle` instead.
+   */
+  async broadcastMessage(message: Message): HubAsyncResult<PublishResult> {
+    const result = await this.callMethod("broadcastMessage", Message.encode(message).finish());
+    if (result.success) {
+      const peerIds = await Promise.all(
+        result.peerIds.map(async (peerId: Uint8Array) => await createFromProtobuf(peerId)),
+      );
+      return ok({ recipients: peerIds });
+    } else {
+      return err(new HubError(result.errorType as HubErrorCode, result.errorMessage as string));
+    }
+  }
+
+  /** Serializes and publishes a Farcaster Message to the network. This message may not be immediately
+   *  sent to the gossip network as it may instead be bundled with other messages and sent as a bundle.
+   *
+   *  If you need to broadcast an individual message, use `broadcastMessage` instead.
+   */
+  async gossipMessage(message: Message): HubAsyncResult<GossipMessageResult> {
     const result = await this.callMethod("gossipMessage", Message.encode(message).finish());
+    if (result.success) {
+      const peerIds = await Promise.all(
+        result.peerIds.map(async (peerId: Uint8Array) => await createFromProtobuf(peerId)),
+      );
+
+      return ok({
+        bundled: result.bundled ?? false,
+        recipients: peerIds,
+      });
+    } else {
+      return err(new HubError(result.errorType as HubErrorCode, result.errorMessage as string));
+    }
+  }
+
+  /** Serializes and publishes a bundle to the network */
+  async gossipBundle(messageBundle: MessageBundle): HubAsyncResult<PublishResult> {
+    const result = await this.callMethod("gossipBundle", MessageBundle.encode(messageBundle).finish());
     if (result.success) {
       const peerIds = await Promise.all(
         result.peerIds.map(async (peerId: Uint8Array) => await createFromProtobuf(peerId)),

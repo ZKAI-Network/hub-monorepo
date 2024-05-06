@@ -1,5 +1,30 @@
 # @farcaster/hub-nodejs
 
+## 0.11.11
+
+### Patch Changes
+
+- 7b374890: feat: Add Link CompactStateMessage type for link compaction
+- Updated dependencies [ab9258af]
+- Updated dependencies [7b374890]
+  - @farcaster/core@0.14.11
+
+## 0.11.10
+
+### Patch Changes
+
+- 4c9fb617: feat: allow sharding event stream by fid
+- Updated dependencies [4c9fb617]
+  - @farcaster/core@0.14.10
+
+## 0.11.9
+
+### Patch Changes
+
+- 5ca5a4a5: feat: Add gossip MessageBundles
+- Updated dependencies [5ca5a4a5]
+  - @farcaster/core@0.14.9
+
 ## 0.11.8
 
 ### Patch Changes

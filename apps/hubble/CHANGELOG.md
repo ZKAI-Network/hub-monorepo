@@ -1,5 +1,99 @@
 # @farcaster/hubble
 
+## 1.12.1
+
+### Patch Changes
+
+- 26ced763: fix: Retry uploads of snapshot chunks to R2
+- 4286432d: fix: Check if we need to prune before actually pruning
+- 7b850fb9: fix: Fname index from Little endian -> big endian migration
+
+## 1.12.0
+
+### Minor Changes
+
+- chore: Release 1.12
+
+### Patch Changes
+
+- 23b94856: fix: Use `PutObject` to upload snapshot chunks to R2
+- e3afd5c8: fix: Use priority queue for sync work
+- 063d4ed1: fix: sharding events should work when requesting historical events
+- ec3b4e76: chore: Cleanup bundles code
+- 1642e610: fix: Remove backup fetching for get_node
+- 6bec999d: perf: Use multiple workers for validateOrRevokeMessages job
+- 93de5d76: fix: Prevent unnecessary decode/encode in rpc APIs
+- 089d1d1b: fix: Batch the de-dup check for merging messages
+- 006473dd: perf: Improve getSyncMetadataByPrefix performance
+- 63742239: chore: Cleanup trie batch inserts to use batches
+- 1317f1ce: fix: Use R2 for snapshots
+- f0bee818: fix: Batch insert merkle trie updates
+- 45cf3f40: fix(hubble): Add startup check for hub to verify gRPC port is reachable from public internet. Reachable address is required for hub to perform diff sync via gRPC API and sync with the network. Hub operators may need to enable port-forwarding of traffic to hub's host and port if they are behind a NAT. Startup check emits warning for now, but may be enforced in the future.
+- 5778e3a1: perf: Disable WAL when generating snapshots
+- 7b374890: feat: Add Link CompactStateMessage type for link compaction
+- Updated dependencies [7b374890]
+  - @farcaster/hub-nodejs@0.11.11
+
+## 1.11.8
+
+### Patch Changes
+
+- cd7db2dc: fix: Split the snapshot into 4GB chunks
+
+## 1.11.7
+
+### Patch Changes
+
+- ee1e0543: fix: Restrict `yarn snapshot-url` to mainnet - snapshots are not supported on other networks
+- 4c9fb617: feat: allow sharding event stream by fid
+- dd10cdb1: fix: update diagnostics reports to prefix tags with fid and peer_id
+- 7a1ccc38: fix: Handle axios errors while reporting to Datadog
+- 51907b05: perf: DiffSync v2
+- 3977c682: fix: Don't allow parallel storage cache scans
+- a7b309ee: fix: Use threadpool for trie node ops
+- ac229e2e: fix: Use pagesize=1 when scanning for first key
+- Updated dependencies [4c9fb617]
+  - @farcaster/hub-nodejs@0.11.10
+
+## 1.11.6
+
+### Patch Changes
+
+- 6b4ea835: chore: Run validateOrRevokeMessagesJob once a month for each fid
+- f1ffdd73: fix: Cleanup DB directory after destroy and reset TrieDB before catchupSyncwithSnapshot
+- ce3f4241: perf: Use threadpool to getMany
+- 86566b15: tests: Cleanup after tests properly
+- 36191e5a: chore: update catchup sync with snapshot default to true
+- 5ca5a4a5: feat: Add gossip MessageBundles
+- Updated dependencies [5ca5a4a5]
+  - @farcaster/hub-nodejs@0.11.9
+
+## 1.11.5
+
+### Patch Changes
+
+- 2dcb3e80: fix: Change out-of-order warning to statsd
+- 58b49138: perf: Count keys at prefix directly instead of forEachIterator
+- 0728546f: fix: Create online snapshots using snapshot iterators
+- d90b127d: perf: Support multiple validation workers
+- 5e04c0a7: perf: Move merkle trie to rust
+- b069d1e9: fix: Adjust nightly validateOrRevoke job time to run earlier
+- 5e04c0a7: chore: Migrate trie node data to TrieDB
+- 4fc41e1b: fix: Prune hub events in a threadpool
+- bbc94487: fix: Log memory usage every 60s
+- 05cb3397: perf: Cache trieDB writes
+- 651ba7ac: fix: Throttle storageCache prepopulation
+- c838795d: perf: Run long gRPC queries in a threadpool.
+- ab71a53b: perf: Add LRU Cache for active signer and ID registry events
+- 86e972ec: feat: Add --log-individual-messages to log each submitMessage status. If disabled (default) write one line per second
+- c46790ac: fix: Calculate sleep time correctly for throttling validateOrRevoke job
+- 436139f5: feat(hubble):
+
+  - Add opt-out diagnostics reporting sent to the Farcaster foundation. Users may opt out with CLI flag `--opt-out-diagnostics true` or environment variable `HUB_OPT_OUT_DIAGNOSTICS=true`. Diagnostics are used to troubleshoot user issues and improve health of the network.
+  - Add CLI flag `--diagnostic-report-url <url>`, and environment variables `HUB_DIAGNOSTICS_API_KEY`, `HUB_DIAGNOSTICS_APP_KEY` environment variables to pass in configurable DataDog-compatible URL and authorization tokens.
+
+  fix(hubble): Add `L2_RPC_AUTHORIZATION_HEADER` environment variable for use with L2 RPC URLs that require authorization headers for access.
+
 ## 1.11.4
 
 ### Patch Changes

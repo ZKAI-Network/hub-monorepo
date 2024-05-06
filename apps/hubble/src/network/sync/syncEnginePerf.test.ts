@@ -1,10 +1,12 @@
 import { FarcasterNetwork, Factories, HubRpcClient, CastAddMessage, OnChainEvent } from "@farcaster/hub-nodejs";
+import { getFarcasterTime } from "@farcaster/core";
 import SyncEngine from "../../network/sync/syncEngine.js";
 import { jestRocksDB } from "../../storage/db/jestUtils.js";
 import { MockHub } from "../../test/mocks.js";
 import { MockRpcClient } from "./mock.js";
-import { getFarcasterTime } from "@farcaster/core";
-import { EMPTY_HASH } from "./merkleTrie.js";
+import { sleepWhile } from "../../utils/crypto.js";
+
+const SLEEPWHILE_TIMEOUT = 1 * 1000;
 
 const testDb = jestRocksDB("engine.syncEnginePerf.test");
 const testDb2 = jestRocksDB("engine2.syncEnginePerf.test");
@@ -70,6 +72,9 @@ describe("SyncEnginePerfTest", () => {
           expect(res.isOk()).toBeTruthy();
         }
 
+        await sleepWhile(() => syncEngine2.syncTrieQSize > 0, SLEEPWHILE_TIMEOUT);
+        await sleepWhile(() => syncEngine1.syncTrieQSize > 0, SLEEPWHILE_TIMEOUT);
+
         // Sanity check, they should equal
         expect(await syncEngine1.trie.rootHash()).toEqual(await syncEngine2.trie.rootHash());
 
@@ -82,7 +87,7 @@ describe("SyncEnginePerfTest", () => {
         snapshot2.prefix = Buffer.from("00306622", "hex");
 
         let rpcClient = new MockRpcClient(hub2.engine, syncEngine2);
-        await syncEngine1.performSync("engine2", snapshot2, rpcClient as unknown as HubRpcClient);
+        await syncEngine1.performSync("engine2", rpcClient as unknown as HubRpcClient);
         expect(rpcClient.getAllSyncIdsByPrefixCalls.length).toEqual(0);
         expect(rpcClient.getAllMessagesBySyncIdsCalls.length).toEqual(0);
 
@@ -91,15 +96,7 @@ describe("SyncEnginePerfTest", () => {
 
         // Even with a bad snapshot, we should still not call the sync APIs because the hashes match
         rpcClient = new MockRpcClient(hub2.engine, syncEngine2);
-        await syncEngine1.performSync(
-          "engine2",
-          {
-            numMessages: 1000,
-            prefix: Buffer.from("999999"),
-            excludedHashes: [EMPTY_HASH],
-          },
-          rpcClient as unknown as HubRpcClient,
-        );
+        await syncEngine1.performSync("engine2", rpcClient as unknown as HubRpcClient);
         expect(rpcClient.getAllSyncIdsByPrefixCalls.length).toEqual(0);
         expect(rpcClient.getAllMessagesBySyncIdsCalls.length).toEqual(0);
       } finally {

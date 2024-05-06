@@ -29,7 +29,6 @@ import {
   bytesCompare,
   CastAddMessage,
   CastRemoveMessage,
-  getFarcasterTime,
   LinkAddMessage,
   LinkRemoveMessage,
   ReactionAddMessage,
@@ -139,6 +138,22 @@ const putEventTransaction = (txn: RocksDbTransaction, event: HubEvent): RocksDbT
   return txn.put(key, value);
 };
 
+export const fidFromEvent = (event: HubEvent): number => {
+  if (isMergeMessageHubEvent(event)) {
+    return event.mergeMessageBody.message.data?.fid || 0;
+  } else if (isMergeOnChainHubEvent(event)) {
+    return event.mergeOnChainEventBody.onChainEvent.fid || 0;
+  } else if (isMergeUsernameProofHubEvent(event)) {
+    return event.mergeUsernameProofBody.usernameProof?.fid || 0;
+  } else if (isPruneMessageHubEvent(event)) {
+    return event.pruneMessageBody.message.data?.fid || 0;
+  } else if (isRevokeMessageHubEvent(event)) {
+    return event.revokeMessageBody.message.data?.fid || 0;
+  } else {
+    throw new Error("invalid hub event type for determining fid");
+  }
+};
+
 export type StoreEventHandlerOptions = {
   lockMaxPending?: number | undefined;
   lockExecutionTimeout?: number | undefined;
@@ -180,9 +195,7 @@ class StoreEventHandler extends TypedEmitter<StoreEvents> {
       logger.debug({ fid }, "fid has no registered storage, would be pruned");
     }
 
-    return units.map((u) => {
-      return u;
-    });
+    return units;
   }
 
   async getUsage(fid: number, store: StoreType): HubAsyncResult<StoreUsage> {
@@ -215,15 +228,15 @@ class StoreEventHandler extends TypedEmitter<StoreEvents> {
   }
 
   async getCacheMessageCount(fid: number, set: UserMessagePostfix, forceFetch = true): HubAsyncResult<number> {
-    return this._storageCache.getMessageCount(fid, set, forceFetch);
+    return await this._storageCache.getMessageCount(fid, set, forceFetch);
   }
 
   async getEarliestTsHash(fid: number, set: UserMessagePostfix): HubAsyncResult<Uint8Array | undefined> {
-    return this._storageCache.getEarliestTsHash(fid, set);
+    return await this._storageCache.getEarliestTsHash(fid, set);
   }
 
   async syncCache(): HubAsyncResult<void> {
-    return ResultAsync.fromPromise(this._storageCache.syncFromDb(), (e) => e as HubError);
+    return await ResultAsync.fromPromise(this._storageCache.syncFromDb(), (e) => e as HubError);
   }
 
   async getEvent(id: number): HubAsyncResult<HubEvent> {
@@ -364,21 +377,12 @@ class StoreEventHandler extends TypedEmitter<StoreEvents> {
       return err(iteratorOpts.error);
     }
 
-    let error: HubError | undefined;
-    await this._db.forEachIteratorByOpts(iteratorOpts.value, async (key, _value) => {
-      const result = await ResultAsync.fromPromise(this._db.del(key as Buffer), (e) => e as HubError);
-      if (result.isErr()) {
-        error = result.error;
-        return true; // stop iteration
-      }
-      return false;
-    });
+    const result = await ResultAsync.fromPromise(
+      this._db.deleteAllKeysInRange(iteratorOpts.value),
+      (e) => e as HubError,
+    );
 
-    if (error) {
-      return err(error);
-    } else {
-      return ok(undefined);
-    }
+    return result.map((_) => {});
   }
 
   private broadcastEvent(event: HubEvent): HubResult<void> {

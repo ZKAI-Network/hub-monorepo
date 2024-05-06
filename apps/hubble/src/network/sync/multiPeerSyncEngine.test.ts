@@ -13,7 +13,7 @@ import {
   MessageData,
 } from "@farcaster/hub-nodejs";
 import { APP_NICKNAME, APP_VERSION, HubInterface } from "../../hubble.js";
-import SyncEngine, { QUICK_SYNC_TS_CUTOFF } from "./syncEngine.js";
+import SyncEngine from "./syncEngine.js";
 import { SyncId } from "./syncId.js";
 import Server from "../../rpc/server.js";
 import { jestRocksDB } from "../../storage/db/jestUtils.js";
@@ -74,9 +74,11 @@ beforeAll(async () => {
 describe("Multi peer sync engine", () => {
   jest.setTimeout(TEST_TIMEOUT_LONG);
   const addMessagesWithTimeDelta = async (engine: Engine, timeDelta: number[]) => {
+    // Take care that the farcasterTime is not in the future
+    const farcasterTime = getFarcasterTime()._unsafeUnwrap() - 1000;
+
     return await Promise.all(
       timeDelta.map(async (t) => {
-        const farcasterTime = getFarcasterTime()._unsafeUnwrap();
         const cast = await Factories.CastAddMessage.create(
           { data: { fid, network, timestamp: farcasterTime + t } },
           { transient: { signer } },
@@ -223,7 +225,7 @@ describe("Multi peer sync engine", () => {
       ).toBeTruthy();
 
       // Sync engine 2 with engine 1
-      await syncEngine2.performSync("engine1", (await syncEngine1.getSnapshot())._unsafeUnwrap(), clientForServer1);
+      await syncEngine2.performSync("engine1", clientForServer1);
 
       // Make sure root hash matches
       expect(await syncEngine1.trie.rootHash()).toEqual(await syncEngine2.trie.rootHash());
@@ -259,7 +261,8 @@ describe("Multi peer sync engine", () => {
       expect((await syncEngine2.syncStatus("engine1", newSnapshot))._unsafeUnwrap().shouldSync).toBeTruthy();
 
       // Do the sync again, this time enabling audit
-      await syncEngine2.performSync("engine1", newSnapshot, clientForServer1, true);
+      await syncEngine2.performSync("engine1", clientForServer1, true);
+      await sleepWhile(() => syncEngine2.syncTrieQSize > 0, SLEEPWHILE_TIMEOUT);
 
       // Make sure root hash matches
       expect(await syncEngine1.trie.rootHash()).toEqual(await syncEngine2.trie.rootHash());
@@ -273,7 +276,7 @@ describe("Multi peer sync engine", () => {
       const peerScoreBefore = syncEngine2.getPeerScore("engine1");
 
       // Now sync again
-      await syncEngine2.performSync("engine1", newSnapshot, clientForServer1, true);
+      await syncEngine2.performSync("engine1", clientForServer1, true);
 
       // Make sure root hash matches and peer score has increased
       expect(await syncEngine1.trie.rootHash()).toEqual(await syncEngine2.trie.rootHash());
@@ -283,60 +286,6 @@ describe("Multi peer sync engine", () => {
     },
     TEST_TIMEOUT_LONG,
   );
-
-  test("sync should respect 2-week cutoff", async () => {
-    // Add signer custody event to engine 1
-    await expect(engine1.mergeOnChainEvent(custodyEvent)).resolves.toBeDefined();
-    await expect(engine1.mergeOnChainEvent(signerEvent)).resolves.toBeDefined();
-    await expect(engine1.mergeOnChainEvent(storageEvent)).resolves.toBeDefined();
-    await expect(engine1.mergeUserNameProof(fname)).resolves.toBeDefined();
-
-    // Sync engine 2 with engine 1, this should get all the onchain events and fnames
-    await syncEngine2.performSync("engine1", (await syncEngine1.getSnapshot())._unsafeUnwrap(), clientForServer1);
-    await sleepWhile(() => syncEngine2.syncTrieQSize > 0, SLEEPWHILE_TIMEOUT);
-
-    // Make sure root hash matches
-    expect(await syncEngine1.trie.rootHash()).toEqual(await syncEngine2.trie.rootHash());
-    // Add messages to engine 1. The first message is > 2 weeks old, the second is new.
-    const nowFsTime = getFarcasterTime()._unsafeUnwrap();
-    const oldFsTime = nowFsTime - QUICK_SYNC_TS_CUTOFF - 1;
-
-    const oldCast = await Factories.CastAddMessage.create(
-      { data: { fid, network, timestamp: oldFsTime } },
-      { transient: { signer } },
-    );
-    const newCast = await Factories.CastAddMessage.create(
-      { data: { fid, network, timestamp: nowFsTime } },
-      { transient: { signer } },
-    );
-
-    // Merge the casts in
-    let result = await engine1.mergeMessage(oldCast);
-    expect(result.isOk()).toBeTruthy();
-    result = await engine1.mergeMessage(newCast);
-    expect(result.isOk()).toBeTruthy();
-
-    await sleepWhile(() => syncEngine1.syncTrieQSize > 0, SLEEPWHILE_TIMEOUT);
-
-    // Engine 2 should sync with engine1 (including onchain events and fnames)
-    expect(
-      (await syncEngine2.syncStatus("engine2", (await syncEngine1.getSnapshot())._unsafeUnwrap()))._unsafeUnwrap()
-        .shouldSync,
-    ).toBeTruthy();
-
-    // Sync engine 2 with engine 1
-    await syncEngine2.performSync(
-      "engine1",
-      (await syncEngine1.getSnapshot())._unsafeUnwrap(),
-      clientForServer1,
-      false,
-      nowFsTime - 1,
-    );
-
-    // Expect the new cast to be in the sync trie, but not the old one
-    expect(await syncEngine2.trie.exists(SyncId.fromMessage(newCast))).toBeTruthy();
-    expect(await syncEngine2.trie.exists(SyncId.fromMessage(oldCast))).toBeFalsy();
-  });
 
   test("cast remove should remove from trie", async () => {
     // Add signer custody event to engine 1
@@ -349,7 +298,7 @@ describe("Multi peer sync engine", () => {
     await sleepWhile(() => syncEngine1.syncTrieQSize > 0, SLEEPWHILE_TIMEOUT);
 
     // Sync engine 2 with engine 1
-    await syncEngine2.performSync("engine1", (await syncEngine1.getSnapshot())._unsafeUnwrap(), clientForServer1);
+    await syncEngine2.performSync("engine1", clientForServer1);
     await sleepWhile(() => syncEngine2.syncTrieQSize > 0, SLEEPWHILE_TIMEOUT);
 
     expect(await syncEngine2.trie.rootHash()).toEqual(await syncEngine1.trie.rootHash());
@@ -389,7 +338,7 @@ describe("Multi peer sync engine", () => {
       const clientForServer2 = getInsecureHubRpcClient(`127.0.0.1:${port2}`);
       const engine1RootHashBefore = await syncEngine1.trie.rootHash();
 
-      await syncEngine1.performSync("engine2", (await syncEngine2.getSnapshot())._unsafeUnwrap(), clientForServer2);
+      await syncEngine1.performSync("engine2", clientForServer2);
       await sleepWhile(() => syncEngine1.syncTrieQSize > 0, SLEEPWHILE_TIMEOUT);
 
       expect(await syncEngine1.trie.rootHash()).toEqual(engine1RootHashBefore);
@@ -401,7 +350,7 @@ describe("Multi peer sync engine", () => {
     // castRemove doesn't yet exist in engine2
     expect(await syncEngine2.trie.exists(castRemoveId)).toBeFalsy();
 
-    await syncEngine2.performSync("engine1", (await syncEngine1.getSnapshot())._unsafeUnwrap(), clientForServer1);
+    await syncEngine2.performSync("engine1", clientForServer1);
     await sleepWhile(() => syncEngine2.syncTrieQSize > 0, SLEEPWHILE_TIMEOUT);
 
     expect(await syncEngine2.trie.exists(castRemoveId)).toBeTruthy();
@@ -429,25 +378,24 @@ describe("Multi peer sync engine", () => {
     await sleepWhile(() => syncEngine1.syncTrieQSize > 0, SLEEPWHILE_TIMEOUT);
 
     // Sync engine 2 with engine 1
-    await syncEngine2.performSync("engine1", (await syncEngine1.getSnapshot())._unsafeUnwrap(), clientForServer1);
+    await syncEngine2.performSync("engine1", clientForServer1);
 
     // Make sure root hash matches
     expect(await syncEngine1.trie.rootHash()).toEqual(await syncEngine2.trie.rootHash());
 
     // Now, delete the messages from engine 1
-    await engine1.getDb().clear();
+    engine1.getDb().clear();
     const allValues = await syncEngine1.trie.getAllValues(new Uint8Array());
-    for (const value of allValues) {
-      await syncEngine1.trie.deleteByBytes(value);
-    }
+    await syncEngine1.trie.deleteByBytes(allValues);
 
-    // Now, engine 1 should have no messages
-    expect((await syncEngine1.trie.getTrieNodeMetadata(new Uint8Array()))?.numMessages).toEqual(0);
+    // Now, engine 1 should have no messages. Getting the metadata for the root should return
+    // undefined since the root node doesn't exist any more
+    expect(await syncEngine1.trie.getTrieNodeMetadata(new Uint8Array())).toBeUndefined();
 
     const startScore = syncEngine2.getPeerScore("engine1")?.score ?? 0;
 
     // Sync engine 2 with engine 1, but this time the audit will fail
-    await syncEngine2.performSync("engine1", (await syncEngine1.getSnapshot())._unsafeUnwrap(), clientForServer1, true);
+    await syncEngine2.performSync("engine1", clientForServer1, true);
 
     // Check the peer score to make sure it reduced
     const peerScore = syncEngine2.getPeerScore("engine1");
@@ -471,10 +419,60 @@ describe("Multi peer sync engine", () => {
     // has all the messages
     {
       const fetchMessagesSpy = jest.spyOn(syncEngine1, "getAllMessagesBySyncIds");
-      await syncEngine2.performSync("engine1", (await syncEngine1.getSnapshot())._unsafeUnwrap(), clientForServer1);
+      await syncEngine2.performSync("engine1", clientForServer1);
 
       expect(fetchMessagesSpy).not.toHaveBeenCalled();
     }
+  });
+
+  test("sync should not fetch messages after the sync start", async () => {
+    // Add signer custody event to engine 1
+    await expect(engine1.mergeOnChainEvent(custodyEvent)).resolves.toBeDefined();
+    await expect(engine1.mergeOnChainEvent(signerEvent)).resolves.toBeDefined();
+    await expect(engine1.mergeOnChainEvent(storageEvent)).resolves.toBeDefined();
+    await expect(engine1.mergeUserNameProof(fname)).resolves.toBeDefined();
+
+    // Sync engine 2 with engine 1, this should get all the onchain events and fnames
+    await syncEngine2.performSync("engine1", clientForServer1);
+    await sleepWhile(() => syncEngine2.syncTrieQSize > 0, SLEEPWHILE_TIMEOUT);
+
+    // Make sure root hash matches
+    expect(await syncEngine1.trie.rootHash()).toEqual(await syncEngine2.trie.rootHash());
+
+    // Add messages to engine 1.
+    const nowFsTime = getFarcasterTime()._unsafeUnwrap();
+    const futureFsTime = nowFsTime + 2 * 60;
+
+    const futureCast = await Factories.CastAddMessage.create(
+      { data: { fid, network, timestamp: futureFsTime } },
+      { transient: { signer } },
+    );
+    const currentCast = await Factories.CastAddMessage.create(
+      { data: { fid, network, timestamp: nowFsTime } },
+      { transient: { signer } },
+    );
+
+    // Merge the casts in
+    let result = await engine1.mergeMessage(futureCast);
+    expect(result.isOk()).toBeTruthy();
+    result = await engine1.mergeMessage(currentCast);
+    expect(result.isOk()).toBeTruthy();
+
+    await sleepWhile(() => syncEngine1.syncTrieQSize > 0, SLEEPWHILE_TIMEOUT);
+
+    // Engine 2 should sync with engine1 (including onchain events and fnames)
+    expect(
+      (await syncEngine2.syncStatus("engine2", (await syncEngine1.getSnapshot())._unsafeUnwrap()))._unsafeUnwrap()
+        .shouldSync,
+    ).toBeTruthy();
+
+    // Sync engine 2 with engine 1
+    await syncEngine2.performSync("engine1", clientForServer1);
+
+    // Expect the current cast to be in the sync trie, but not the future one, because it will be after
+    // the sync engine start time
+    expect(await syncEngine2.trie.exists(SyncId.fromMessage(currentCast))).toBeTruthy();
+    expect(await syncEngine2.trie.exists(SyncId.fromMessage(futureCast))).toBeFalsy();
   });
 
   test("should fetch only the exact missing message", async () => {
@@ -488,7 +486,7 @@ describe("Multi peer sync engine", () => {
     // Syncing engine2 --> engine1 should fetch only the missing message
     {
       const fetchMessagesSpy = jest.spyOn(syncEngine1, "getAllMessagesBySyncIds");
-      await syncEngine2.performSync("engine1", (await syncEngine1.getSnapshot())._unsafeUnwrap(), clientForServer1);
+      await syncEngine2.performSync("engine1", clientForServer1);
 
       expect(fetchMessagesSpy).toHaveBeenCalledTimes(1);
       expect(fetchMessagesSpy).toHaveBeenCalledWith([SyncId.fromMessage(msgs[0] as Message)]);
@@ -503,7 +501,7 @@ describe("Multi peer sync engine", () => {
     await engine1.mergeOnChainEvent(signerEvent);
     await engine1.mergeOnChainEvent(storageEvent);
 
-    await syncEngine2.performSync("engine1", (await syncEngine1.getSnapshot())._unsafeUnwrap(), clientForServer1);
+    await syncEngine2.performSync("engine1", clientForServer1);
 
     // Because do it without awaiting, we need to wait for the promise to resolve
     await sleep(100);
@@ -516,7 +514,7 @@ describe("Multi peer sync engine", () => {
     await engine2.mergeOnChainEvent(custodyEvent);
     await engine2.mergeOnChainEvent(signerEvent);
     await engine2.mergeOnChainEvent(storageEvent);
-    await syncEngine2.performSync("engine1", (await syncEngine1.getSnapshot())._unsafeUnwrap(), clientForServer1);
+    await syncEngine2.performSync("engine1", clientForServer1);
 
     // Because do it without awaiting, we need to wait for the promise to resolve
     await sleep(100);
@@ -526,6 +524,8 @@ describe("Multi peer sync engine", () => {
   test("local peer removes bad syncId entries from the sync trie", async () => {
     await engine1.mergeOnChainEvent(custodyEvent);
     await engine2.mergeOnChainEvent(custodyEvent);
+    await sleepWhile(() => syncEngine2.syncTrieQSize > 0, SLEEPWHILE_TIMEOUT);
+    await sleepWhile(() => syncEngine1.syncTrieQSize > 0, SLEEPWHILE_TIMEOUT);
 
     const engine1Hash = await syncEngine1.trie.rootHash();
     expect(engine1Hash).toEqual(await syncEngine2.trie.rootHash());
@@ -537,10 +537,12 @@ describe("Multi peer sync engine", () => {
     await syncEngine2.trie.insert(SyncId.fromFName(Factories.UserNameProof.build({ name: fname.name, fid: fid + 1 })));
 
     expect(engine1Hash).not.toEqual(await syncEngine2.trie.rootHash());
-    await syncEngine2.performSync("engine1", (await syncEngine1.getSnapshot())._unsafeUnwrap(), clientForServer1);
+    await syncEngine2.performSync("engine1", clientForServer1);
 
     // Because do it without awaiting, we need to wait for the promise to resolve
-    await sleep(100);
+    await sleepWhile(() => syncEngine2.syncTrieQSize > 0, SLEEPWHILE_TIMEOUT);
+    await sleepWhile(() => syncEngine1.syncTrieQSize > 0, SLEEPWHILE_TIMEOUT);
+
     expect(await syncEngine1.trie.items()).toEqual(await syncEngine2.trie.items());
     expect(engine1Hash).toEqual(await syncEngine2.trie.rootHash());
   });
@@ -550,7 +552,7 @@ describe("Multi peer sync engine", () => {
     await syncEngine1.trie.insert(SyncId.fromMessage(castAdd));
 
     // Attempt to sync engine2 <-- engine1.
-    await syncEngine2.performSync("engine1", (await syncEngine1.getSnapshot())._unsafeUnwrap(), clientForServer1);
+    await syncEngine2.performSync("engine1", clientForServer1);
 
     // Since the message is actually missing, it should be a no-op, and the missing message should disappear
     // from the sync trie
@@ -575,8 +577,6 @@ describe("Multi peer sync engine", () => {
     await engine1.mergeOnChainEvent(storageEvent);
     await engine2.mergeOnChainEvent(storageEvent);
 
-    const initialEngine1Count = await syncEngine1.trie.items();
-    const initialEngine2Count = await syncEngine1.trie.items();
     // We'll get 2 CastAdds
     const castAdd1 = await Factories.CastAddMessage.create({ data: { fid, network } }, { transient: { signer } });
     const castAdd2 = await Factories.CastAddMessage.create({ data: { fid, network } }, { transient: { signer } });
@@ -586,22 +586,26 @@ describe("Multi peer sync engine", () => {
     expect(await engine1.mergeMessage(castAdd1)).toBeTruthy();
 
     // CastAdd2 is added only to the sync trie, but is missing from the engine
-    await syncEngine2.trie.insert(SyncId.fromMessage(castAdd2));
+    expect(await syncEngine2.trie.insert(SyncId.fromMessage(castAdd2))).toBeTruthy();
 
     // Wait for the sync trie to be updated
-    await sleepWhile(async () => (await syncEngine2.trie.items()) !== initialEngine2Count + 2, SLEEPWHILE_TIMEOUT);
-    await sleepWhile(async () => (await syncEngine1.trie.items()) !== initialEngine1Count + 1, SLEEPWHILE_TIMEOUT);
+    await sleepWhile(() => syncEngine2.syncTrieQSize > 0, SLEEPWHILE_TIMEOUT);
+    await sleepWhile(() => syncEngine1.syncTrieQSize > 0, SLEEPWHILE_TIMEOUT);
+
+    expect(await syncEngine2.trie.items()).toEqual(3 + 2); // 2 onchain events + 2 castAdds
+    expect(await syncEngine1.trie.items()).toEqual(3 + 1); // 2 onchain events + 1 castAdd
 
     // Attempt to sync engine2 <-- engine1. Engine1 has only singerAdd
-    await syncEngine2.performSync("engine1", (await syncEngine1.getSnapshot())._unsafeUnwrap(), clientForServer1);
+    await syncEngine2.performSync("engine1", clientForServer1);
 
     // The sync engine should realize that castAdd2 is not in it's engine, so it should be removed from the sync trie
     await sleepWhile(async () => (await syncEngine2.trie.exists(SyncId.fromMessage(castAdd2))) === true, 1000);
-
     expect(await syncEngine2.trie.exists(SyncId.fromMessage(castAdd2))).toBeFalsy();
 
     // but the castAdd1 should still be there
     expect(await syncEngine2.trie.exists(SyncId.fromMessage(castAdd1))).toBeTruthy();
+
+    expect(await syncEngine1.trie.items()).toEqual(await syncEngine2.trie.items());
   });
 
   test("recovers if messages are missing from the sync trie", async () => {
@@ -620,9 +624,9 @@ describe("Multi peer sync engine", () => {
     await engine2.mergeMessage(castAdd);
 
     // ...but we'll corrupt the sync trie by pretending that the castAdd message, an onchain event and an fname are missing
-    await syncEngine2.trie.deleteBySyncId(SyncId.fromMessage(castAdd));
-    await syncEngine2.trie.deleteBySyncId(SyncId.fromOnChainEvent(storageEvent));
-    await syncEngine2.trie.deleteBySyncId(SyncId.fromFName(fname));
+    await syncEngine2.trie.delete(SyncId.fromMessage(castAdd));
+    await syncEngine2.trie.delete(SyncId.fromOnChainEvent(storageEvent));
+    await syncEngine2.trie.delete(SyncId.fromFName(fname));
 
     // syncengine2 should only have 2 onchain events
     expect(await syncEngine2.trie.items()).toEqual(2);
@@ -630,7 +634,7 @@ describe("Multi peer sync engine", () => {
     // Attempt to sync engine2 <-- engine1.
     // It will appear to engine2 that the message is missing, so it will request it from engine1.
     // It will be a duplicate, but the sync trie should be updated
-    await syncEngine2.performSync("engine1", (await syncEngine1.getSnapshot())._unsafeUnwrap(), clientForServer1);
+    await syncEngine2.performSync("engine1", clientForServer1);
 
     // Since the message isn't actually missing, it should be a no-op, and the missing message should
     // get added back to the sync trie
@@ -666,7 +670,7 @@ describe("Multi peer sync engine", () => {
     await sleepWhile(async () => (await syncEngine2.trie.items()) !== initialEngine2Count + 1, SLEEPWHILE_TIMEOUT);
 
     // Do a sync
-    await syncEngine2.performSync("engine1", (await syncEngine1.getSnapshot())._unsafeUnwrap(), clientForServer1);
+    await syncEngine2.performSync("engine1", clientForServer1);
     await sleepWhile(async () => (await syncEngine2.trie.items()) !== initialEngine2Count + 2, SLEEPWHILE_TIMEOUT);
 
     expect(await syncEngine2.trie.items()).toEqual(initialEngine2Count + 2);
@@ -677,7 +681,7 @@ describe("Multi peer sync engine", () => {
       const port2 = await server2.start();
       const clientForServer2 = getInsecureHubRpcClient(`127.0.0.1:${port2}`);
 
-      await syncEngine1.performSync("engine2", (await syncEngine2.getSnapshot())._unsafeUnwrap(), clientForServer2);
+      await syncEngine1.performSync("engine2", clientForServer2);
       await sleepWhile(async () => (await syncEngine1.trie.items()) !== initialEngine2Count + 2, 1000);
 
       // Now both engines should have the same number of messages and the same root hash
@@ -698,6 +702,9 @@ describe("Multi peer sync engine", () => {
     await engine2.mergeOnChainEvent(signerEvent);
     await engine2.mergeOnChainEvent(storageEvent);
 
+    await sleepWhile(() => syncEngine1.syncTrieQSize > 0, SLEEPWHILE_TIMEOUT);
+    await sleepWhile(() => syncEngine2.syncTrieQSize > 0, SLEEPWHILE_TIMEOUT);
+
     expect(await syncEngine1.trie.items()).toEqual(await syncEngine2.trie.items());
     expect(await syncEngine1.trie.rootHash()).toEqual(await syncEngine2.trie.rootHash());
 
@@ -709,7 +716,7 @@ describe("Multi peer sync engine", () => {
     await sleepWhile(() => syncEngine2.syncTrieQSize > 0, SLEEPWHILE_TIMEOUT);
 
     // Do a sync
-    await syncEngine2.performSync("engine1", (await syncEngine1.getSnapshot())._unsafeUnwrap(), clientForServer1);
+    await syncEngine2.performSync("engine1", clientForServer1);
     await sleepWhile(() => syncEngine2.syncTrieQSize > 0, SLEEPWHILE_TIMEOUT);
 
     expect(await syncEngine2.trie.items()).toEqual(6); // Includes on chain events
@@ -720,7 +727,7 @@ describe("Multi peer sync engine", () => {
       const port2 = await server2.start();
       const clientForServer2 = getInsecureHubRpcClient(`127.0.0.1:${port2}`);
 
-      await syncEngine1.performSync("engine2", (await syncEngine2.getSnapshot())._unsafeUnwrap(), clientForServer2);
+      await syncEngine1.performSync("engine2", clientForServer2);
       await sleepWhile(() => syncEngine1.syncTrieQSize > 0, SLEEPWHILE_TIMEOUT);
 
       // Now both engines should have the same number of messages and the same root hash
@@ -808,7 +815,7 @@ describe("Multi peer sync engine", () => {
 
       // Sync engine 2 with engine 1, and measure the time taken
       totalTime = await timedTest(async () => {
-        await syncEngine2.performSync("engine1", (await syncEngine1.getSnapshot())._unsafeUnwrap(), clientForServer1);
+        await syncEngine2.performSync("engine1", clientForServer1);
       });
 
       expect(totalTime).toBeGreaterThan(0);

@@ -103,18 +103,26 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("createDb", RocksDB::js_create_db)?;
     cx.export_function("dbOpen", RocksDB::js_open)?;
     cx.export_function("dbApproximateSize", RocksDB::js_approximate_size)?;
-    cx.export_function("dbCreateTarBackup", RocksDB::js_create_tar_backup)?;
-    cx.export_function("dbCreateTarGzip", RocksDB::js_create_tar_gzip)?;
     cx.export_function("dbClear", RocksDB::js_clear)?;
     cx.export_function("dbClose", RocksDB::js_close)?;
     cx.export_function("dbDestroy", RocksDB::js_destroy)?;
     cx.export_function("dbLocation", RocksDB::js_location)?;
+    cx.export_function("dbKeysExist", RocksDB::js_keys_exist)?;
     cx.export_function("dbGet", RocksDB::js_get)?;
     cx.export_function("dbGetMany", RocksDB::js_get_many)?;
     cx.export_function("dbPut", RocksDB::js_put)?;
     cx.export_function("dbDel", RocksDB::js_del)?;
     cx.export_function("dbCommit", RocksDB::js_commit_transaction)?;
-
+    cx.export_function("dbSnapshotBackup", RocksDB::js_snapshot_backup)?;
+    cx.export_function("dbCountKeysAtPrefix", RocksDB::js_count_keys_at_prefix)?;
+    cx.export_function(
+        "dbDeleteAllKeysInRange",
+        RocksDB::js_delete_all_keys_in_range,
+    )?;
+    cx.export_function(
+        "dbFetchIteratorPageByPrefix",
+        RocksDB::js_fetch_iterator_page_by_prefix,
+    )?;
     cx.export_function(
         "dbForEachIteratorByPrefix",
         RocksDB::js_for_each_iterator_by_prefix,
@@ -129,6 +137,7 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
 
     // Generic methods that can accept any store
     cx.export_function("merge", Store::js_merge)?;
+    cx.export_function("mergeMany", Store::js_merge_many)?;
     cx.export_function("revoke", Store::js_revoke)?;
     cx.export_function("pruneMessages", Store::js_prune_messages)?;
     cx.export_function("getAllMessagesByFid", Store::js_get_all_messages_by_fid)?;

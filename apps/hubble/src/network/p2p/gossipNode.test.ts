@@ -19,7 +19,6 @@ import { PeerId } from "@libp2p/interface-peer-id";
 import { sleepWhile } from "../../utils/crypto.js";
 import { createEd25519PeerId } from "@libp2p/peer-id-factory";
 import { LibP2PNode } from "./gossipNodeWorker.js";
-import { ResultAsync } from "neverthrow";
 
 const TEST_TIMEOUT_SHORT = 10 * 1000;
 const TEST_TIMEOUT_LONG = 30 * 1000;
@@ -200,9 +199,9 @@ describe("GossipNode", () => {
 
     test("Gossip Ids match for farcaster protocol messages", async () => {
       await node.start([]);
-      await node.gossipMessage(castAdd);
+      await node.broadcastMessage(castAdd);
       // should be detected as a duplicate
-      const res = await node.gossipMessage(castAdd);
+      const res = await node.broadcastMessage(castAdd);
 
       expect(res.isErr()).toBeTruthy();
       expect(res._unsafeUnwrapErr().errCode).toEqual("bad_request.duplicate");

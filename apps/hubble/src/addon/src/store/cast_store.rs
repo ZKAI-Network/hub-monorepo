@@ -1,14 +1,18 @@
 use super::{
-    bytes_compare, hub_error_to_js_throw, make_cast_id_key, make_fid_key, make_user_key, message,
+    bytes_compare, deferred_settle_messages, hub_error_to_js_throw, make_cast_id_key, make_fid_key,
+    make_user_key, message,
     store::{Store, StoreDef},
     utils::{encode_messages_to_js_object, get_page_options, get_store},
     HubError, MessagesPage, PageOptions, RootPrefix, StoreEventHandler, UserPostfix, HASH_LENGTH,
     PAGE_SIZE_MAX, TRUE_VALUE, TS_HASH_LENGTH,
 };
-use crate::protos::{message_data, CastRemoveBody};
 use crate::{
     db::{RocksDB, RocksDbTransactionBatch},
     protos::{self, Message, MessageType},
+};
+use crate::{
+    protos::{message_data, CastRemoveBody},
+    THREAD_POOL,
 };
 use neon::{
     context::{Context, FunctionContext},
@@ -77,6 +81,14 @@ impl StoreDef for CastStoreDef {
             && message.data.is_some()
             && message.data.as_ref().unwrap().r#type == MessageType::CastRemove as i32
             && message.data.as_ref().unwrap().body.is_some()
+    }
+
+    fn compact_state_message_type(&self) -> u8 {
+        MessageType::None as u8
+    }
+
+    fn is_compact_state_type(&self, _message: &Message) -> bool {
+        false
     }
 
     fn find_merge_add_conflicts(
@@ -218,6 +230,13 @@ impl StoreDef for CastStoreDef {
             message.data.as_ref().unwrap().fid as u32,
             hash,
         ))
+    }
+
+    fn make_compact_state_add_key(&self, _message: &Message) -> Result<Vec<u8>, HubError> {
+        Err(HubError {
+            code: "bad_request.invalid_param".to_string(),
+            message: "Cast Store doesn't support compact state".to_string(),
+        })
     }
 
     fn get_prune_size_limit(&self) -> u32 {
@@ -474,7 +493,7 @@ impl CastStore {
         fid: u32,
         page_options: &PageOptions,
     ) -> Result<MessagesPage, HubError> {
-        store.get_adds_by_fid(fid, page_options, Some(|_: &Message| true))
+        store.get_adds_by_fid::<fn(&protos::Message) -> bool>(fid, page_options, None)
     }
 
     pub fn js_create_cast_store(mut cx: FunctionContext) -> JsResult<JsBox<Arc<Store>>> {
@@ -503,15 +522,13 @@ impl CastStore {
         let fid = cx.argument::<JsNumber>(0).unwrap().value(&mut cx) as u32;
         let page_options = get_page_options(&mut cx, 1)?;
 
-        let messages = match Self::get_cast_adds_by_fid(&store, fid, &page_options) {
-            Ok(messages) => messages,
-            Err(e) => return hub_error_to_js_throw(&mut cx, e),
-        };
-
         let channel = cx.channel();
         let (deferred, promise) = cx.promise();
-        deferred.settle_with(&channel, move |mut cx| {
-            encode_messages_to_js_object(&mut cx, messages)
+
+        THREAD_POOL.lock().unwrap().execute(move || {
+            let messages = Self::get_cast_adds_by_fid(&store, fid, &page_options);
+
+            deferred_settle_messages(deferred, &channel, messages);
         });
 
         Ok(promise)
@@ -522,7 +539,7 @@ impl CastStore {
         fid: u32,
         page_options: &PageOptions,
     ) -> Result<MessagesPage, HubError> {
-        store.get_removes_by_fid(fid, page_options, Some(|_: &Message| true))
+        store.get_removes_by_fid::<fn(&protos::Message) -> bool>(fid, page_options, None)
     }
 
     pub fn js_get_cast_removes_by_fid(mut cx: FunctionContext) -> JsResult<JsPromise> {
@@ -531,15 +548,12 @@ impl CastStore {
         let fid = cx.argument::<JsNumber>(0).unwrap().value(&mut cx) as u32;
         let page_options = get_page_options(&mut cx, 1)?;
 
-        let messages = match Self::get_cast_removes_by_fid(&store, fid, &page_options) {
-            Ok(messages) => messages,
-            Err(e) => return hub_error_to_js_throw(&mut cx, e),
-        };
-
         let channel = cx.channel();
         let (deferred, promise) = cx.promise();
-        deferred.settle_with(&channel, move |mut cx| {
-            encode_messages_to_js_object(&mut cx, messages)
+
+        THREAD_POOL.lock().unwrap().execute(move || {
+            let messages = Self::get_cast_removes_by_fid(&store, fid, &page_options);
+            deferred_settle_messages(deferred, &channel, messages);
         });
 
         Ok(promise)
@@ -557,7 +571,7 @@ impl CastStore {
 
         store
             .db()
-            .for_each_iterator_by_prefix_unbounded(&prefix, page_options, |key, _| {
+            .for_each_iterator_by_prefix(&prefix, page_options, |key, _| {
                 let ts_hash_offset = prefix.len();
                 let fid_offset = ts_hash_offset + TS_HASH_LENGTH;
 
@@ -580,7 +594,8 @@ impl CastStore {
                 Ok(false) // Continue iterating
             })?;
 
-        let messages = message::get_many_messages(store.db().borrow(), message_keys)?;
+        let messages_bytes =
+            message::get_many_messages_as_bytes(store.db().borrow(), message_keys)?;
         let next_page_token = if last_key.len() > 0 {
             Some(last_key[prefix.len()..].to_vec())
         } else {
@@ -588,7 +603,7 @@ impl CastStore {
         };
 
         Ok(MessagesPage {
-            messages,
+            messages_bytes,
             next_page_token,
         })
     }
@@ -648,7 +663,7 @@ impl CastStore {
 
         store
             .db()
-            .for_each_iterator_by_prefix_unbounded(&prefix, page_options, |key, _| {
+            .for_each_iterator_by_prefix(&prefix, page_options, |key, _| {
                 let ts_hash_offset = prefix.len();
                 let fid_offset = ts_hash_offset + TS_HASH_LENGTH;
 
@@ -671,7 +686,8 @@ impl CastStore {
                 Ok(false) // Continue iterating
             })?;
 
-        let messages = message::get_many_messages(store.db().borrow(), message_keys)?;
+        let messages_bytes =
+            message::get_many_messages_as_bytes(store.db().borrow(), message_keys)?;
         let next_page_token = if last_key.len() > 0 {
             Some(last_key[prefix.len()..].to_vec())
         } else {
@@ -679,7 +695,7 @@ impl CastStore {
         };
 
         Ok(MessagesPage {
-            messages,
+            messages_bytes,
             next_page_token,
         })
     }
@@ -691,15 +707,13 @@ impl CastStore {
         let mention = mention.value(&mut cx) as u32;
         let page_options = get_page_options(&mut cx, 1)?;
 
-        let messages = match Self::get_casts_by_mention(&store, mention, &page_options) {
-            Ok(messages) => messages,
-            Err(e) => return hub_error_to_js_throw(&mut cx, e),
-        };
-
         let channel = cx.channel();
         let (deferred, promise) = cx.promise();
-        deferred.settle_with(&channel, move |mut cx| {
-            encode_messages_to_js_object(&mut cx, messages)
+
+        THREAD_POOL.lock().unwrap().execute(move || {
+            let messages = Self::get_casts_by_mention(&store, mention, &page_options);
+
+            deferred_settle_messages(deferred, &channel, messages);
         });
 
         Ok(promise)

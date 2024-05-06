@@ -155,6 +155,10 @@ export async function processMessage(
         log.debug(`Processing ReactionRemoveMessage ${hash} (fid ${fid})`, { fid, hash });
         await processReactionRemove(message, operation, trx, isHubEvent);
         break;
+      case MessageType.LINK_COMPACT_STATE:
+        // These don't need to be explicitly processed
+        log.debug(`Skipping LinkCompactStateMessage ${hash} (fid ${fid})`, { fid, hash });
+        break;
       case MessageType.LINK_ADD:
         if (!isLinkAddMessage(message)) throw new AssertionError(`Invalid LinkAddMessage: ${message}`);
         log.debug(`Processing LinkAddMessage ${hash} (fid ${fid})`, { fid, hash });

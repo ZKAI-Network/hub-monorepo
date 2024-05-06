@@ -3,13 +3,21 @@ import { peerIdFromString } from "@libp2p/peer-id";
 import { PeerId } from "@libp2p/interface-peer-id";
 import { createEd25519PeerId, createFromProtobuf, exportToProtobuf } from "@libp2p/peer-id-factory";
 import { AddrInfo } from "@chainsafe/libp2p-gossipsub/types";
-import { Command, OptionValues } from "commander";
+import { Command } from "commander";
 import fs, { existsSync } from "fs";
 import { mkdir, readFile, writeFile } from "fs/promises";
 import { Result, ResultAsync } from "neverthrow";
 import { dirname, resolve } from "path";
 import { exit } from "process";
-import { APP_VERSION, FARCASTER_VERSION, Hub, HubOptions, HubShutdownReason, S3_REGION } from "./hubble.js";
+import {
+  APP_VERSION,
+  FARCASTER_VERSION,
+  Hub,
+  HubOptions,
+  HubShutdownReason,
+  S3_REGION,
+  SNAPSHOT_S3_UPLOAD_BUCKET,
+} from "./hubble.js";
 import { logger } from "./utils/logger.js";
 import { addressInfoFromParts, hostPortFromString, ipMultiAddrStrFromAddressInfo, parseAddress } from "./utils/p2p.js";
 import { DEFAULT_RPC_CONSOLE, startConsole } from "./console/console.js";
@@ -25,9 +33,10 @@ import { startupCheck, StartupCheckStatus } from "./utils/startupCheck.js";
 import { mainnet, optimism } from "viem/chains";
 import { finishAllProgressBars } from "./utils/progressBars.js";
 import { MAINNET_BOOTSTRAP_PEERS } from "./bootstrapPeers.mainnet.js";
-import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import axios from "axios";
-import { snapshotURLAndMetadata } from "./utils/snapshot.js";
+import { r2Endpoint, snapshotURLAndMetadata } from "./utils/snapshot.js";
+import { DEFAULT_DIAGNOSTIC_REPORT_URL, initDiagnosticReporter } from "./utils/diagnosticReport.js";
+import { ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3";
 
 /** A CLI to accept options from the user and start the Hub */
 
@@ -71,6 +80,10 @@ app
   .option("-c, --config <filepath>", "Path to the config file.")
   .option("--db-name <name>", "The name of the RocksDB instance. (default: rocks.hub._default)")
   .option("--process-file-prefix <prefix>", 'Prefix for file to which hub process number is written. (default: "")')
+  .option(
+    "--log-individual-messages",
+    "Log individual submitMessage. If disabled, log one line per second (default: disabled)",
+  )
 
   // Ethereum Options
   .option("-m, --eth-mainnet-rpc-url <url>", "RPC URL of a Mainnet ETH Node (or comma separated list of URLs)")
@@ -129,7 +142,7 @@ app
   .option("--enable-snapshot-to-s3", "Enable daily snapshots to be uploaded to S3. (default: disabled)")
   .option("--s3-snapshot-bucket <bucket>", "The S3 bucket to upload snapshots to")
   .option("--disable-snapshot-sync", "Disable syncing from snapshots. (default: enabled)")
-  .option("--catchup-sync-with-snapshot [boolean]", "Enable catchup sync with snapshot. (default: disabled)")
+  .option("--catchup-sync-with-snapshot [boolean]", "Enable catchup sync with snapshot. (default: enabled)")
   .option(
     "--catchup-sync-snapshot-message-limit <number>",
     `Difference in message count before triggering snapshot sync. (default: ${DEFAULT_CATCHUP_SYNC_SNAPSHOT_MESSAGE_LIMIT})`,
@@ -139,6 +152,17 @@ app
   .option(
     "--statsd-metrics-server <host>",
     'The host to send statsd metrics to, eg "127.0.0.1:8125". (default: disabled)',
+  )
+
+  // Opt-out Diagnostics Reporting
+  .option(
+    "--opt-out-diagnostics [boolean]",
+    "Opt-out of sending diagnostics data to the Farcaster foundation. " +
+      "Diagnostics are used to troubleshoot user issues and improve health of the network. (default: disabled)",
+  )
+  .option(
+    "--diagnostic-report-url <url>",
+    `The URL to send diagnostic reports to. (default: ${DEFAULT_DIAGNOSTIC_REPORT_URL})`,
   )
 
   // Debugging options
@@ -499,6 +523,7 @@ app
 
     const options: HubOptions = {
       peerId,
+      logIndividualMessages: cliOptions.logIndividualMessages ?? hubConfig.logIndividualMessages ?? false,
       ipMultiAddr: ipMultiAddrResult.value,
       rpcServerHost: hubAddressInfo.value.address,
       announceIp: cliOptions.announceIp ?? hubConfig.announceIp,
@@ -583,19 +608,6 @@ app
       );
     }
 
-    if (options.enableSnapshotToS3) {
-      // Set the Hub to exit (and be automatically restarted) so that the snapshot is uploaded
-      // before the Hub starts syncing
-      // Calculate and set a timeout to run at 9:10 am UTC (2:10 am PST)
-      const millisTill9 = millisTillRestart();
-      logger.info({ millisTill9 }, "Scheduling Hub to exit at 9:10 am UTC to upload snapshot to S3");
-
-      setTimeout(async () => {
-        logger.info("Exiting Hub to upload snapshot to S3");
-        handleShutdownSignal("S3SnapshotUpload");
-      }, millisTill9);
-    }
-
     await startupCheck.rpcCheck(options.ethMainnetRpcUrl, mainnet, "L1");
     await startupCheck.rpcCheck(options.l2RpcUrl, optimism, "L2", options.l2ChainId);
 
@@ -604,6 +616,30 @@ app
       logger.flush();
       process.exit(1);
     }
+
+    // Opt-out Diagnostics Reporting
+    let optOut: boolean;
+    if (process.env["HUB_OPT_OUT_DIAGNOSTICS"] || process.env["HUB_OPT_OUT_DIAGNOSTIC"]) {
+      if (process.env["HUB_OPT_OUT_DIAGNOSTICS"]) {
+        optOut = process.env["HUB_OPT_OUT_DIAGNOSTICS"] === "true";
+      } else {
+        optOut = process.env["HUB_OPT_OUT_DIAGNOSTIC"] === "true";
+      }
+    } else {
+      optOut = cliOptions.optOutDiagnostics ? cliOptions.optOutDiagnostics === "true" : hubConfig.optOutDiagnostics;
+    }
+    let reportURL: string;
+    if (process.env["HUB_DIAGNOSTIC_REPORT_URL"]) {
+      reportURL = process.env["HUB_DIAGNOSTIC_REPORT_URL"];
+    } else {
+      reportURL = cliOptions.diagnosticReportUrl ?? DEFAULT_DIAGNOSTIC_REPORT_URL;
+    }
+    initDiagnosticReporter({
+      optOut,
+      reportURL,
+      ...(options.hubOperatorFid && { fid: options.hubOperatorFid }),
+      ...(options.peerId && { peerId: options.peerId?.toString() }),
+    });
 
     const hubResult = Result.fromThrowable(
       () => new Hub(options),
@@ -683,6 +719,11 @@ const s3SnapshotURL = new Command("snapshot-url")
   .option("-b --s3-snapshot-bucket <bucket>", "The S3 bucket that holds snapshot(s)")
   .action(async (options) => {
     const network = farcasterNetworkFromJSON(options.network ?? FarcasterNetwork.MAINNET);
+    if (network !== FarcasterNetwork.MAINNET) {
+      console.error("Only mainnet snapshots are supported at this time");
+      exit(1);
+    }
+
     const response = await snapshotURLAndMetadata(network, 0, options.s3SnapshotBucket);
     if (response.isErr()) {
       console.error("error fetching snapshot data", response.error);
@@ -690,7 +731,7 @@ const s3SnapshotURL = new Command("snapshot-url")
     }
     const [url, metadata] = response.value;
     console.log(`${JSON.stringify(metadata, null, 2)}`);
-    console.log(`Download at: ${url}`);
+    console.log(`Download chunks under directory at: ${url}`);
     exit(0);
   });
 
@@ -905,30 +946,28 @@ app.parse(process.argv);
 ///////////////////////////////////////////////////////////////
 //                        UTILS
 ///////////////////////////////////////////////////////////////
-function millisTillRestart(): number {
-  // Calculate the number of milliseconds until 9:10 am UTC (2:10 am PST)
-  const now = new Date();
-  const timeAt9 = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 9, 10, 0, 0).getTime();
-
-  const millisTill9Tomorrow = timeAt9 + 24 * 60 * 60 * 1000 - now.getTime();
-  const millisTill9Today = timeAt9 - now.getTime();
-
-  return millisTill9Today > 0 ? millisTill9Today : millisTill9Tomorrow;
-}
 
 // Verify that we have access to the AWS credentials.
 // Either via environment variables or via the AWS credentials file
 async function verifyAWSCredentials(): Promise<boolean> {
-  const sts = new STSClient({ region: S3_REGION });
+  const s3 = new S3Client({
+    region: S3_REGION,
+    endpoint: r2Endpoint(),
+    forcePathStyle: true,
+  });
 
   try {
-    const identity = await sts.send(new GetCallerIdentityCommand({}));
+    const params = {
+      Bucket: SNAPSHOT_S3_UPLOAD_BUCKET,
+      Prefix: "snapshots/",
+    };
 
-    logger.info({ accountId: identity.Account }, "Verified AWS credentials");
+    const result = await s3.send(new ListObjectsV2Command(params));
+    logger.info({ keys: result.KeyCount }, "Verified R2 credentials for snapshots");
 
     return true;
   } catch (error) {
-    logger.error({ err: error }, "Failed to verify AWS credentials. No S3 snapshot upload will be performed.");
+    logger.error({ err: error }, "Failed to verify R2 credentials. No snapshots performed.");
     return false;
   }
 }
