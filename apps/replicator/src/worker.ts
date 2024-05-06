@@ -17,7 +17,7 @@ export function getWorker(redis: Redis, log: Logger, { concurrency }: { concurre
     useWorkerThreads: WORKER_TYPE === "thread",
     concurrency,
     connection: redis,
-    removeOnComplete: { count: 100 }, // Keep at most this many completed jobs
+    removeOnComplete: { count: 20 }, // Keep at most this many completed jobs
     removeOnFail: { count: 5000 }, // Keep at most this many failed jobs
   });
 

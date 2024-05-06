@@ -1,10 +1,36 @@
 import { UserDataAddMessage } from "@farcaster/hub-nodejs";
 import { DBTransaction, execute } from "../db.js";
-import { farcasterTimeToDate } from "../util.js";
+import { farcasterTimeToDate, putKinesisRecords } from "../util.js";
 
-export const processUserDataAdd = async (message: UserDataAddMessage, trx: DBTransaction) => {
+import AWS from "aws-sdk";
+import { Records } from "aws-sdk/clients/rdsdataservice.js";
+import {AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY } from "../env.js";
+
+
+export const processUserDataAdd = async (message: UserDataAddMessage, trx: DBTransaction, isHubEvent: boolean = false) => {
   const now = new Date();
-
+  
+  
+  let records = [];
+    
+  let recordsJson = {
+    timestamp: farcasterTimeToDate(message.data.timestamp),
+    fid: message.data.fid,
+    hash: message.hash,
+    type: message.data.userDataBody.type,
+    value: message.data.userDataBody.value,
+  }
+  
+  records = [
+    {
+      Data: JSON.stringify(recordsJson),
+      PartitionKey: "USER_DATA_ADD",
+    },
+  ];
+  // console.log(`push kinesis start`);
+  // await putKinesisRecords(records, "farcaster-stream");
+  // console.log(`push kinesis end`);
+  
   await execute(
     trx
       .insertInto("userData")

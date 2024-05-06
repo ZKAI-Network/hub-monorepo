@@ -1,11 +1,15 @@
-import { CastAddMessage, CastRemoveMessage, Embed, MessageType } from "@farcaster/hub-nodejs";
+import { CastAddMessage, CastRemoveMessage, Embed, MessageType, Message } from "@farcaster/hub-nodejs";
 import { Selectable, sql } from "kysely";
 import { jsonObjectFrom } from "kysely/helpers/postgres";
 import { buildAddRemoveMessageProcessor } from "../messageProcessor.js";
-import { CastEmbedJson, CastRow, executeTakeFirst, executeTakeFirstOrThrow } from "../db.js";
-import { bytesToHex, farcasterTimeToDate } from "../util.js";
+import { CastEmbedJson, CastRow, executeTakeFirst, executeTakeFirstOrThrow, DBTransaction } from "../db.js";
+import { bytesToHex, farcasterTimeToDate, StoreMessageOperation, isAfterTargetTimeToday, 
+    isBetweenPeriod, isToday, putKinesisRecords } from "../util.js";
 import { AssertionError, HubEventProcessingBlockedError } from "../error.js";
-import { PARTITIONS } from "../env.js";
+import { PARTITIONS, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, useTimePeriodKinesis} from "../env.js";
+import AWS from "aws-sdk";
+import { Records } from "aws-sdk/clients/rdsdataservice.js";
+
 
 const { processAdd, processRemove } = buildAddRemoveMessageProcessor<
   CastAddMessage,
@@ -36,7 +40,7 @@ const { processAdd, processRemove } = buildAddRemoveMessageProcessor<
       trx.selectFrom("casts").select(["deletedAt"]).where("fid", "=", message.data.fid).where("hash", "=", hash),
     );
   },
-  async deleteDerivedRow(message, trx) {
+  async deleteDerivedRow(message, trx, isHubEvent: boolean = false) {
     return await executeTakeFirstOrThrow(
       trx
         .updateTable("casts")
@@ -46,7 +50,7 @@ const { processAdd, processRemove } = buildAddRemoveMessageProcessor<
         .returningAll(),
     );
   },
-  async mergeDerivedRow(message, deleted, trx) {
+  async mergeDerivedRow(message, deleted, trx, isHubEvent: boolean = false) {
     const {
       hash,
       data: {
@@ -101,6 +105,38 @@ const { processAdd, processRemove } = buildAddRemoveMessageProcessor<
       rootParentHash = parentCast.rootParentHash;
       rootParentUrl = parentCast.rootParentUrl;
     }
+    
+    let records = [];
+    
+    let recordsJson = {
+      timestamp: farcasterTimeToDate(timestamp),
+      deletedAt: deleted ? new Date() : null,
+      fid,
+      parentFid: parentCastId?.fid || null,
+      hash,
+      rootParentHash: rootParentHash || parentCastId?.hash || null,
+      parentHash: parentCastId?.hash || null,
+      rootParentUrl: rootParentUrl || parentUrl || null,
+      text,
+      embeds: JSON.stringify(transformedEmbeds),
+      mentions: JSON.stringify(mentions),
+      mentionsPositions: JSON.stringify(mentionsPositions),
+    }
+    
+    
+    console.log("isTodayCasts: ", isToday(farcasterTimeToDate(timestamp)));
+    // if (isAfterTargetTimeToday(farcasterTimeToDate(timestamp)) || (useTimePeriodKinesis && isBetweenPeriod(farcasterTimeToDate(timestamp))))  {
+    if(isToday(farcasterTimeToDate(timestamp))) {
+      console.log(`push kinesis start`);
+      records = [
+        {
+          Data: JSON.stringify(recordsJson),
+          PartitionKey: bytesToHex(hash),
+        },
+      ];
+      await putKinesisRecords(records, "farcaster-casts-stream");
+      console.log(`push kinesis end`);
+    }
 
     return await executeTakeFirstOrThrow(
       trx
@@ -145,5 +181,6 @@ const { processAdd, processRemove } = buildAddRemoveMessageProcessor<
     }
   },
 });
+
 
 export { processAdd as processCastAdd, processRemove as processCastRemove };

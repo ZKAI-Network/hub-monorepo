@@ -34,7 +34,7 @@ import {
 import { Redis } from "ioredis";
 import { sql } from "kysely";
 import { DB, DBTransaction, execute, executeTx } from "../db.js";
-import { PARTITIONS } from "../env.js";
+import { PARTITIONS, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY } from "../env.js";
 import { Logger } from "../log.js";
 import {
   bytesToHex,
@@ -43,6 +43,7 @@ import {
   farcasterTimeToDate,
   StoreMessageOperation,
   toHexEncodedUint8Array,
+  putKinesisRecords
 } from "../util.js";
 import { processOnChainEvent } from "./onChainEvent.js";
 import { processUserNameProofAdd, processUserNameProofMessage, processUserNameProofRemove } from "./usernameProof.js";
@@ -54,8 +55,12 @@ import { processVerificationAddEthAddress, processVerificationRemove } from "./v
 import { processUserDataAdd } from "./userData.js";
 import { MergeMessage } from "../jobs/mergeMessage.js";
 import { statsd } from "../statsd.js";
+import AWS from "aws-sdk";
+import { Records } from "aws-sdk/clients/rdsdataservice.js";
 
-export async function processOnChainEvents(events: OnChainEvent[], db: DB, log: Logger, redis: Redis) {
+
+
+export async function processOnChainEvents(events: OnChainEvent[], db: DB, log: Logger, redis: Redis, isHubEvent: boolean = false) {
   for (const event of events) {
     const txHash = bytesToHex(event.transactionHash);
     log.debug(
@@ -63,7 +68,7 @@ export async function processOnChainEvents(events: OnChainEvent[], db: DB, log: 
       { fid: event.fid, type: event.type, txHash, txIdx: event.txIndex, logIdx: event.logIndex },
     );
     await executeTx(db, async (trx) => {
-      await processOnChainEvent(event, trx);
+      await processOnChainEvent(event, trx, isHubEvent);
     });
   }
 
@@ -97,20 +102,20 @@ export async function processUserNameProof(db: DB, log: Logger, proof: UserNameP
   });
 }
 
-export async function mergeMessage(message: Message, trx: DBTransaction, log: Logger, redis: Redis) {
-  await processMessage(message, "merge", trx, log, redis);
+export async function mergeMessage(message: Message, trx: DBTransaction, log: Logger, redis: Redis, isHubEvent: boolean = false) {
+  await processMessage(message, "merge", trx, log, redis, isHubEvent);
 }
 
-export async function deleteMessage(message: Message, trx: DBTransaction, log: Logger, redis: Redis) {
-  await processMessage(message, "delete", trx, log, redis);
+export async function deleteMessage(message: Message, trx: DBTransaction, log: Logger, redis: Redis, isHubEvent: boolean = false) {
+  await processMessage(message, "delete", trx, log, redis, isHubEvent);
 }
 
-export async function pruneMessage(message: Message, trx: DBTransaction, log: Logger, redis: Redis) {
-  await processMessage(message, "prune", trx, log, redis);
+export async function pruneMessage(message: Message, trx: DBTransaction, log: Logger, redis: Redis, isHubEvent: boolean = false) {
+  await processMessage(message, "prune", trx, log, redis, isHubEvent);
 }
 
-export async function revokeMessage(message: Message, trx: DBTransaction, log: Logger, redis: Redis) {
-  await processMessage(message, "revoke", trx, log, redis);
+export async function revokeMessage(message: Message, trx: DBTransaction, log: Logger, redis: Redis, isHubEvent: boolean = false) {
+  await processMessage(message, "revoke", trx, log, redis, isHubEvent);
 }
 
 export async function processMessage(
@@ -119,36 +124,36 @@ export async function processMessage(
   trx: DBTransaction,
   log: Logger,
   redis: Redis,
+  isHubEvent: boolean = false
 ) {
   const message = transformMessage(inputMessage);
   if (!message.data) throw new AssertionError("Message contained no data");
 
-  await storeMessage(message, operation, trx, log);
+  await storeMessage(message, operation, trx, log, isHubEvent);
 
   const hash = bytesToHex(message.hash);
   const fid = message.data.fid;
-
   try {
     switch (message.data.type) {
       case MessageType.CAST_ADD:
         if (!isCastAddMessage(message)) throw new AssertionError(`Invalid CastAddMessage: ${message}`);
         log.debug(`Processing CastAddMessage ${hash} (fid ${fid})`, { fid, hash });
-        await processCastAdd(message, operation, trx);
+        await processCastAdd(message, operation, trx, isHubEvent);
         break;
       case MessageType.CAST_REMOVE:
         if (!isCastRemoveMessage(message)) throw new AssertionError(`Invalid CastRemoveMessage: ${message}`);
         log.debug(`Processing CastRemoveMessage ${hash} (fid ${fid})`, { fid, hash });
-        await processCastRemove(message, operation, trx);
+        await processCastRemove(message, operation, trx, isHubEvent);
         break;
       case MessageType.REACTION_ADD:
         if (!isReactionAddMessage(message)) throw new AssertionError(`Invalid ReactionAddMessage: ${message}`);
         log.debug(`Processing ReactionAddMessage ${hash} (fid ${fid})`, { fid, hash });
-        await processReactionAdd(message, operation, trx);
+        await processReactionAdd(message, operation, trx, isHubEvent);
         break;
       case MessageType.REACTION_REMOVE:
         if (!isReactionRemoveMessage(message)) throw new AssertionError(`Invalid ReactionRemoveMessage: ${message}`);
         log.debug(`Processing ReactionRemoveMessage ${hash} (fid ${fid})`, { fid, hash });
-        await processReactionRemove(message, operation, trx);
+        await processReactionRemove(message, operation, trx, isHubEvent);
         break;
       case MessageType.LINK_COMPACT_STATE:
         // These don't need to be explicitly processed
@@ -157,37 +162,36 @@ export async function processMessage(
       case MessageType.LINK_ADD:
         if (!isLinkAddMessage(message)) throw new AssertionError(`Invalid LinkAddMessage: ${message}`);
         log.debug(`Processing LinkAddMessage ${hash} (fid ${fid})`, { fid, hash });
-        await processLinkAdd(message, operation, trx);
+        await processLinkAdd(message, operation, trx, isHubEvent);
         break;
       case MessageType.LINK_REMOVE:
         if (!isLinkRemoveMessage(message)) throw new AssertionError(`Invalid LinkRemoveMessage: ${message}`);
         log.debug(`Processing LinkRemoveMessage ${hash} (fid ${fid})`, { fid, hash });
-        await processLinkRemove(message, operation, trx);
+        await processLinkRemove(message, operation, trx, isHubEvent);
         break;
       case MessageType.VERIFICATION_ADD_ETH_ADDRESS: {
         // TODO: add support for multi-protocol verification
         if (!isVerificationAddAddressMessage(message))
           throw new AssertionError(`Invalid VerificationAddEthAddressMessage: ${message}`);
         log.debug(`Processing VerificationAddEthAddressMessage ${hash} (fid ${fid})`, { fid, hash });
-
-        await processVerificationAddEthAddress(message, operation, trx);
+        await processVerificationAddEthAddress(message, operation, trx, isHubEvent);
         break;
       }
       case MessageType.VERIFICATION_REMOVE:
         if (!isVerificationRemoveMessage(message))
           throw new AssertionError(`Invalid VerificationRemoveMessage: ${message}`);
         log.debug(`Processing VerificationRemoveMessage ${hash} (fid ${fid})`, { fid, hash });
-        await processVerificationRemove(message, operation, trx);
+        await processVerificationRemove(message, operation, trx, isHubEvent);
         break;
       case MessageType.USER_DATA_ADD:
         if (!isUserDataAddMessage(message)) throw new AssertionError(`Invalid UserDataAddMessage: ${message}`);
         log.debug(`Processing UserDataAddMessage ${hash} (fid ${fid})`, { fid, hash });
-        await processUserDataAdd(message, trx);
+        await processUserDataAdd(message, trx, isHubEvent);
         break;
       case MessageType.USERNAME_PROOF:
         if (!isUsernameProofMessage(message)) throw new AssertionError(`Invalid UsernameProofMessage: ${message}`);
         log.debug(`Processing UsernameProofMessage ${hash} (fid ${fid})`, { fid, hash });
-        await processUserNameProofMessage(message, operation, trx);
+        await processUserNameProofMessage(message, operation, trx, isHubEvent);
         break;
       case MessageType.FRAME_ACTION:
         throw new AssertionError("Unexpected FRAME_ACTION message type");
@@ -350,11 +354,41 @@ export async function storeMessage(
   operation: StoreMessageOperation,
   trx: DBTransaction,
   log: Logger,
+  isHubEvent: boolean = false
 ) {
   if (!message.data) throw new Error("Message missing data!"); // Shouldn't happen
   const now = new Date();
 
   log.debug(`Storing message ${bytesToHex(message.hash)} via ${operation} operation`);
+  let records = [];
+    
+  let recordsJson = {
+    createdAt: now,
+    updatedAt: now,
+    fid: message.data.fid,
+    type: message.data.type,
+    timestamp: farcasterTimeToDate(message.data.timestamp),
+    hash: message.hash,
+    hashScheme: message.hashScheme,
+    signature: message.signature,
+    signatureScheme: message.signatureScheme,
+    signer: message.signer,
+    raw: Message.encode(message).finish(),
+    deletedAt: operation === "delete" ? now : null,
+    prunedAt: operation === "prune" ? now : null,
+    revokedAt: operation === "revoke" ? now : null,
+    body: JSON.stringify(convertProtobufMessageBodyToJson(message)),
+  }
+  
+  records = [
+    {
+      Data: JSON.stringify(recordsJson),
+      PartitionKey: "MESSAGE_ADD",
+    },
+  ];
+  // console.log(`push kinesis start`);
+  // await putKinesisRecords(records, "farcaster-stream");
+  // console.log(`push kinesis end`);
   await execute(
     trx
       .insertInto("messages")
@@ -405,32 +439,33 @@ export async function storeMessage(
 }
 
 export async function processHubEvent(hubEvent: HubEvent, db: DB, log: Logger, redis: Redis) {
+  const isHubEvent = true;
   switch (hubEvent.type) {
     case HubEventType.MERGE_MESSAGE:
       log.info(`Processing merge event ${hubEvent.id}`);
       if (!isMergeMessageHubEvent(hubEvent)) throw new AssertionError(`Invalid MergeMessageHubEvent: ${hubEvent}`);
-      await processMergeMessageHubEvent(hubEvent, db, log, redis);
+      await processMergeMessageHubEvent(hubEvent, db, log, redis, isHubEvent);
       break;
     case HubEventType.PRUNE_MESSAGE:
       log.info(`Processing prune event ${hubEvent.id}`);
       if (!isPruneMessageHubEvent(hubEvent)) throw new AssertionError(`Invalid PruneMessageHubEvent: ${hubEvent}`);
-      await processPruneMessageHubEvent(hubEvent, db, log, redis);
+      await processPruneMessageHubEvent(hubEvent, db, log, redis, isHubEvent);
       break;
     case HubEventType.REVOKE_MESSAGE:
       log.info(`Processing revoke event ${hubEvent.id}`);
       if (!isRevokeMessageHubEvent(hubEvent)) throw new AssertionError(`Invalid RevokeMessageHubEvent: ${hubEvent}`);
-      await processRevokeMessageHubEvent(hubEvent, db, log, redis);
+      await processRevokeMessageHubEvent(hubEvent, db, log, redis, isHubEvent);
       break;
     case HubEventType.MERGE_ON_CHAIN_EVENT:
       log.info(`Processing onchain event ${hubEvent.id}`);
       if (!isMergeOnChainHubEvent(hubEvent)) throw new AssertionError(`Invalid MergeOnChainHubEvent: ${hubEvent}`);
-      await processMergeOnChainHubEvent(hubEvent, db, log, redis);
+      await processMergeOnChainHubEvent(hubEvent, db, log, redis, isHubEvent);
       break;
     case HubEventType.MERGE_USERNAME_PROOF:
       log.info(`Processing username proof event ${hubEvent.id}`);
       if (!isMergeUsernameProofHubEvent(hubEvent))
         throw new AssertionError(`Invalid MergeUsernameProofHubEvent: ${hubEvent}`);
-      await processUserNameProofHubEvent(hubEvent, db, log, redis);
+      await processUserNameProofHubEvent(hubEvent, db, log, redis, isHubEvent);
       break;
     case HubEventType.NONE:
       throw new AssertionError("HubEvent contained no type");
@@ -446,30 +481,31 @@ export async function processMergeOnChainHubEvent(
   db: DB,
   log: Logger,
   redis: Redis,
+  isHubEvent: boolean = false
 ) {
-  await processOnChainEvents([hubEvent.mergeOnChainEventBody.onChainEvent], db, log, redis);
+  await processOnChainEvents([hubEvent.mergeOnChainEventBody.onChainEvent], db, log, redis, isHubEvent);
 }
 
-export async function processMergeMessageHubEvent(hubEvent: MergeMessageHubEvent, db: DB, log: Logger, redis: Redis) {
+export async function processMergeMessageHubEvent(hubEvent: MergeMessageHubEvent, db: DB, log: Logger, redis: Redis, isHubEvent: boolean = false) {
   const { message, deletedMessages } = hubEvent.mergeMessageBody;
   await executeTx(db, async (trx) => {
-    await mergeMessage(message, trx, log, redis);
+    await mergeMessage(message, trx, log, redis, isHubEvent);
 
     for (const deletedMessage of deletedMessages) {
-      await deleteMessage(deletedMessage, trx, log, redis);
+      await deleteMessage(deletedMessage, trx, log, redis, isHubEvent);
     }
   });
 }
 
-export async function processPruneMessageHubEvent(hubEvent: PruneMessageHubEvent, db: DB, log: Logger, redis: Redis) {
+export async function processPruneMessageHubEvent(hubEvent: PruneMessageHubEvent, db: DB, log: Logger, redis: Redis, isHubEvent: boolean = false) {
   await executeTx(db, async (trx) => {
-    await pruneMessage(hubEvent.pruneMessageBody.message, trx, log, redis);
+    await pruneMessage(hubEvent.pruneMessageBody.message, trx, log, redis, isHubEvent);
   });
 }
 
-export async function processRevokeMessageHubEvent(hubEvent: RevokeMessageHubEvent, db: DB, log: Logger, redis: Redis) {
+export async function processRevokeMessageHubEvent(hubEvent: RevokeMessageHubEvent, db: DB, log: Logger, redis: Redis, isHubEvent: boolean = false) {
   await executeTx(db, async (trx) => {
-    await revokeMessage(hubEvent.revokeMessageBody.message, trx, log, redis);
+    await revokeMessage(hubEvent.revokeMessageBody.message, trx, log, redis, isHubEvent);
   });
 }
 
@@ -478,13 +514,14 @@ export async function processUserNameProofHubEvent(
   db: DB,
   log: Logger,
   redis: Redis,
+  isHubEvent: boolean = false
 ) {
   const { usernameProof, usernameProofMessage, deletedUsernameProof, deletedUsernameProofMessage } =
     hubEvent.mergeUsernameProofBody;
   await executeTx(db, async (trx) => {
-    if (deletedUsernameProof) await processUserNameProofRemove(deletedUsernameProof, trx);
-    if (deletedUsernameProofMessage) await revokeMessage(deletedUsernameProofMessage, trx, log, redis);
-    if (usernameProof) await processUserNameProofAdd(usernameProof, trx);
-    if (usernameProofMessage) await mergeMessage(usernameProofMessage, trx, log, redis);
+    if (deletedUsernameProof) await processUserNameProofRemove(deletedUsernameProof, trx, isHubEvent);
+    if (deletedUsernameProofMessage) await revokeMessage(deletedUsernameProofMessage, trx, log, redis, isHubEvent);
+    if (usernameProof) await processUserNameProofAdd(usernameProof, trx, isHubEvent);
+    if (usernameProofMessage) await mergeMessage(usernameProofMessage, trx, log, redis, isHubEvent);
   });
 }

@@ -11,7 +11,20 @@ import { ProcessHubEvent } from "./jobs/processHubEvent.js";
 import { processOnChainEvent } from "./processors/onChainEvent.js";
 import { statsd } from "./statsd.js";
 import { sleep } from "./util.js";
-import { STATSD_HOST } from "./env.js";
+import { STATSD_HOST, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY } from "./env.js";
+import AWS from "aws-sdk";
+
+
+const credentials = new AWS.Credentials({
+  accessKeyId: AWS_ACCESS_KEY_ID,
+  secretAccessKey: AWS_SECRET_ACCESS_KEY
+});
+
+AWS.config.update({
+    credentials: credentials,
+    region: "eu-west-1" 
+});
+
 
 export class HubReplicator {
   private eventsSubscriber: HubSubscriber;
@@ -192,10 +205,22 @@ export class HubReplicator {
   private async waitForOtherChainEventsBackfill({ maxFid }: { maxFid: number }) {
     let startTime = Date.now();
     const alreadyBackfilled = await this.redis.scard("backfilled-other-onchain-events");
+    const timeoutMs = 1800000; // 30 minutes
+    let prevDifference = null;
+    let sameDifferenceCount = 0;  
 
     for (;;) {
       const dataBackfilled = await this.redis.scard("backfilled-other-onchain-events");
-      if (dataBackfilled >= maxFid) break;
+      // if (dataBackfilled >= maxFid) break;
+      if (dataBackfilled >= maxFid ||  (sameDifferenceCount >= 100 && (Date.now() - startTime) > timeoutMs)) break;
+
+      const difference = maxFid - dataBackfilled;
+      if (prevDifference !== null && difference === prevDifference) {
+          sameDifferenceCount++;
+      } else {
+          sameDifferenceCount = 0;
+      }
+      prevDifference = difference;
 
       const elapsedMs = Date.now() - startTime;
       const millisRemaining = Math.ceil(

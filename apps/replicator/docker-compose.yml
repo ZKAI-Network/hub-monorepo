@@ -2,7 +2,7 @@ version: '3.9'
 
 services:
   replicator:
-    image: farcasterxyz/replicator:latest
+    image: farcasterxyz/replicator:mbd-0.3.7
     build:
         context: ../../
         dockerfile: Dockerfile.replicator
@@ -30,25 +30,25 @@ services:
     networks:
       - replicator-network
 
-  postgres:
-    image: 'postgres:16-alpine'
-    restart: unless-stopped
-    ports:
-      - '6541:5432' # Use a port unlikely to be in use so the example "Just Works"
-    environment:
-      - POSTGRES_DB=replicator
-      - POSTGRES_USER=replicator
-      - POSTGRES_PASSWORD=password
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      # Need to specify name/user to avoid `FATAL: role "root" does not exist` errors in logs
-      test: ['CMD-SHELL', 'env', 'pg_isready', '--dbname', '$$POSTGRES_DB', '-U', '$$POSTGRES_USER']
-      interval: 10s
-      timeout: 10s
-      retries: 3
-    networks:
-      - replicator-network
+  # postgres:
+  #   image: 'postgres:16-alpine'
+  #   restart: unless-stopped
+  #   ports:
+  #     - '6541:5432' # Use a port unlikely to be in use so the example "Just Works"
+  #   environment:
+  #     - POSTGRES_DB=replicator
+  #     - POSTGRES_USER=replicator
+  #     - POSTGRES_PASSWORD=password
+  #   volumes:
+  #     - postgres-data:/var/lib/postgresql/data
+  #   healthcheck:
+  #     # Need to specify name/user to avoid `FATAL: role "root" does not exist` errors in logs
+  #     test: ['CMD-SHELL', 'env', 'pg_isready', '--dbname', '$$POSTGRES_DB', '-U', '$$POSTGRES_USER']
+  #     interval: 10s
+  #     timeout: 10s
+  #     retries: 3
+  #   networks:
+  #     - replicator-network
 
   redis:
     image: 'redis:7.2-alpine'
@@ -67,29 +67,29 @@ services:
     networks:
       - replicator-network
 
-  statsd:
-    image: graphiteapp/graphite-statsd:1.1.10-5
-    restart: unless-stopped
-    ports:
-      # - '80:80' # Graphite web
-      # - '2003:2003' # Carbon line receiver
-      # - '2004:2004' # Carbon pickle receiver
-      # - '7002:7002' # Carbon cache query
-      - '18125:8125/udp' # StatsD
-      - '18126:8126' # StatsD admin
-    networks:
-      - replicator-network
+  # statsd:
+  #   image: graphiteapp/graphite-statsd:1.1.10-5
+  #   restart: unless-stopped
+  #   ports:
+  #     # - '80:80' # Graphite web
+  #     # - '2003:2003' # Carbon line receiver
+  #     # - '2004:2004' # Carbon pickle receiver
+  #     # - '7002:7002' # Carbon cache query
+  #     - '18125:8125/udp' # StatsD
+  #     - '18126:8126' # StatsD admin
+  #   networks:
+  #     - replicator-network
 
-  grafana:
-    image: grafana/grafana:10.0.3
-    restart: unless-stopped
-    volumes:
-      - ./grafana/grafana.ini:/etc/grafana/grafana.ini
-      - ./grafana/data:/var/lib/grafana
-    ports:
-      - '9001:3000' # Grafana web
-    networks:
-      - replicator-network
+  # grafana:
+  #   image: grafana/grafana:10.0.3
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ./grafana/grafana.ini:/etc/grafana/grafana.ini
+  #     - ./grafana/data:/var/lib/grafana
+  #   ports:
+  #     - '9001:3000' # Grafana web
+  #   networks:
+  #     - replicator-network
 
 volumes:
   app-node_modules:

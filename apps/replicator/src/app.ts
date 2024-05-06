@@ -2,7 +2,7 @@ import { Command } from "@commander-js/extra-typings";
 import * as repl from "repl";
 import { readFileSync } from "fs";
 import { DB, getDbClient, migrateToLatest, migrationStatus } from "./db.js";
-import { CONCURRENCY, HUB_HOST, HUB_SSL, POSTGRES_URL, REDIS_URL, STATSD_HOST, STATSD_METRICS_PREFIX } from "./env.js";
+import { CONCURRENCY, HUB_HOST, HUB_SSL, POSTGRES_URL, REDIS_URL, STATSD_HOST, STATSD_METRICS_PREFIX, SECONDARY_HUB_HOST, SECONDARY_HUB_SSL } from "./env.js";
 import { Logger, log } from "./log.js";
 import { getHubClient } from "./hub.js";
 import { HubReplicator } from "./hubReplicator.js";
@@ -11,6 +11,10 @@ import { terminateProcess, onTerminate } from "./util.js";
 import { getWebApp } from "./web.js";
 import { getWorker } from "./worker.js";
 import { initializeStatsd, statsd } from "./statsd.js";
+import * as fs from 'fs';
+import path from 'path';
+
+const certPath = path.resolve('rds-ca-rsa2048-g1.pem');
 
 // Perform shutdown cleanup on termination signal
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
@@ -35,14 +39,44 @@ process.on("unhandledRejection", async (reason, promise) => {
 if (STATSD_HOST) {
   initializeStatsd(STATSD_HOST, STATSD_METRICS_PREFIX);
 }
+const sslObject =   {
+  rejectUnauthorized: false,
+  cert: fs.readFileSync(certPath, 'utf-8').toString(),
+};
 
-const db = getDbClient(POSTGRES_URL);
+const db = getDbClient(POSTGRES_URL, sslObject);
 onTerminate(async () => {
   log.debug("Disconnecting from database");
   await db.destroy();
 });
 
-const hub = getHubClient(HUB_HOST, { ssl: HUB_SSL });
+let hub = null;
+
+async function initializeHubClient(): Promise<void> {
+  try {
+    hub = getHubClient(HUB_HOST, { ssl: HUB_SSL });
+      log.debug("Connected to hub");
+  } catch (error) {
+      log.error(`Error connecting to hub with primary host: ${HUB_HOST}`);
+      // Attempt to connect using secondary host
+      try {
+        hub = getHubClient(SECONDARY_HUB_HOST, { ssl: SECONDARY_HUB_SSL });
+          log.debug("Connected to hub using secondary host");
+      } catch (secondaryError) {
+          log.error(`Error connecting to hub with secondary host: ${SECONDARY_HUB_HOST}`);
+          throw secondaryError; // Throw the error if both hosts fail
+      }
+  }
+}
+
+// Initialize the hub client
+initializeHubClient()
+    .catch((error) => {
+        log.error("Error initializing hub client:", error);
+        process.exit(1); // Terminate the process if initialization fails
+    });
+
+// const hub = getHubClient(HUB_HOST, { ssl: HUB_SSL });
 onTerminate(async () => {
   log.debug("Disconnecting from hub");
   hub.close();

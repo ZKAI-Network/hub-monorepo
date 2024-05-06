@@ -18,9 +18,14 @@ import {
   decodeSignedKeyRequestMetadata,
   exhaustiveGuard,
   farcasterTimeToDate,
+  putKinesisRecords
 } from "../util.js";
 import { AssertionError } from "../error.js";
-import { PARTITIONS } from "../env.js";
+import { PARTITIONS, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY } from "../env.js";
+
+import AWS from "aws-sdk";
+import { KinesisClient, PutRecordsCommand } from "@aws-sdk/client-kinesis";
+
 
 export const storeChainEvent = async (
   event: OnChainEvent,
@@ -30,6 +35,31 @@ export const storeChainEvent = async (
   const raw = OnChainEvent.encode(event).finish();
 
   let alreadyStored = false;
+  let records = [];
+    
+  let recordsJson = {
+    blockTimestamp: new Date(event.blockTimestamp * 1000),
+    fid: event.fid,
+    chainId: event.chainId,
+    blockNumber: event.blockNumber,
+    transactionIndex: event.txIndex,
+    logIndex: event.logIndex,
+    blockHash: event.blockHash,
+    type: event.type,
+    transactionHash: event.transactionHash,
+    body,
+    raw,
+  }
+  
+  records = [
+    {
+      Data: JSON.stringify(recordsJson),
+      PartitionKey: "CHAIN_EVENT_ADD",
+    },
+  ];
+  // console.log(`push kinesis start`);
+  // await putKinesisRecords(records, "farcaster-stream");
+  // console.log(`push kinesis end`);
   let chainEvent = await executeTakeFirst(
     trx
       .insertInto("chainEvents")
@@ -75,6 +105,7 @@ const processSignerChainEvent = async (
   event: SignerOnChainEvent,
   chainEvent: Selectable<ChainEventRow>,
   trx: DBTransaction,
+  isHubEvent: boolean = false
 ) => {
   const body = event.signerEventBody;
   const timestamp = new Date(event.blockTimestamp * 1000);
@@ -88,6 +119,28 @@ const processSignerChainEvent = async (
         signature: signedKeyRequestMetadata.signature,
         deadline: Number(signedKeyRequestMetadata.deadline),
       };
+      let records = [];
+    
+      let recordsJson = {
+        addedAt: timestamp,
+        fid: event.fid,
+        requesterFid: metadataJson.requestFid,
+        addChainEventId: chainEvent.id,
+        key: body.key,
+        keyType: body.keyType,
+        metadata: JSON.stringify(metadataJson),
+        metadataType: body.metadataType,
+      }
+      
+      records = [
+        {
+          Data: JSON.stringify(recordsJson),
+          PartitionKey: "SIGNERS_ADD",
+        },
+      ];
+      // console.log(`push kinesis start`);
+      // await putKinesisRecords(records, "farcaster-stream");
+      // console.log(`push kinesis end`);
 
       await execute(
         trx
@@ -150,6 +203,7 @@ const processIdRegisterChainEvent = async (
   event: IdRegisterOnChainEvent,
   chainEvent: Selectable<ChainEventRow>,
   trx: DBTransaction,
+  isHubEvent: boolean = false,
 ) => {
   const body = event.idRegisterEventBody;
   const custodyAddress = body.to.length ? body.to : NULL_ETH_ADDRESS;
@@ -157,6 +211,26 @@ const processIdRegisterChainEvent = async (
 
   switch (body.eventType) {
     case IdRegisterEventType.REGISTER: {
+      
+      let records = [];
+    
+      let recordsJson = {
+        fid: event.fid,
+        registeredAt: chainEvent.blockTimestamp,
+        chainEventId: chainEvent.id,
+        custodyAddress,
+        recoveryAddress,
+      }
+      
+      records = [
+        {
+          Data: JSON.stringify(recordsJson),
+          PartitionKey: "FIDS_ADD",
+        },
+      ];
+      // console.log(`push kinesis start`);
+      // await putKinesisRecords(records, "farcaster-stream");
+      // console.log(`push kinesis end`);
       await trx
         .insertInto("fids")
         .values({
@@ -214,10 +288,30 @@ const processStorageRentChainEvent = async (
   event: StorageRentOnChainEvent,
   chainEvent: Selectable<ChainEventRow>,
   trx: DBTransaction,
+  isHubEvent: boolean = false
 ) => {
   const body = event.storageRentEventBody;
   const timestamp = new Date(event.blockTimestamp * 1000);
-
+  let records = [];
+    
+  let recordsJson = {
+    fid: event.fid,
+    units: body.units,
+    payer: body.payer,
+    rentedAt: timestamp,
+    expiresAt: farcasterTimeToDate(body.expiry),
+    chainEventId: chainEvent.id,
+  }
+  
+  records = [
+    {
+      Data: JSON.stringify(recordsJson),
+      PartitionKey: "STORAGE_ALLOCATIONS_ADD",
+    },
+  ];
+  // console.log(`push kinesis start`);
+  // await putKinesisRecords(records, "farcaster-stream");
+  // console.log(`push kinesis end`);
   await trx
     .insertInto("storageAllocations")
     .values({
@@ -240,24 +334,24 @@ const processStorageRentChainEvent = async (
     .execute();
 };
 
-export const processOnChainEvent = async (event: OnChainEvent, trx: DBTransaction, skipIfAlreadyStored = true) => {
+export const processOnChainEvent = async (event: OnChainEvent, trx: DBTransaction, isHubEvent: boolean = false, skipIfAlreadyStored = true) => {
   const [chainEvent, alreadyStored] = await storeChainEvent(event, trx);
   if (alreadyStored && skipIfAlreadyStored) return;
 
   switch (event.type) {
     case OnChainEventType.EVENT_TYPE_SIGNER:
       if (!isSignerOnChainEvent(event)) throw new AssertionError(`Invalid SignerOnChainEvent: ${event}`);
-      await processSignerChainEvent(event, chainEvent, trx);
+      await processSignerChainEvent(event, chainEvent, trx, isHubEvent);
       break;
     case OnChainEventType.EVENT_TYPE_SIGNER_MIGRATED:
       break; // Nothing to do since there's no derived tables for this event
     case OnChainEventType.EVENT_TYPE_ID_REGISTER:
       if (!isIdRegisterOnChainEvent(event)) throw new AssertionError(`Invalid IdRegisterOnChainEvent: ${event}`);
-      await processIdRegisterChainEvent(event, chainEvent, trx);
+      await processIdRegisterChainEvent(event, chainEvent, trx, isHubEvent);
       break;
     case OnChainEventType.EVENT_TYPE_STORAGE_RENT:
       if (!isStorageRentOnChainEvent(event)) throw new AssertionError(`Invalid StorageRentOnChainEvent: ${event}`);
-      await processStorageRentChainEvent(event, chainEvent, trx);
+      await processStorageRentChainEvent(event, chainEvent, trx, isHubEvent);
       break;
     case OnChainEventType.EVENT_TYPE_NONE:
       throw new AssertionError(`Invalid OnChainEventType: ${event.type}`);

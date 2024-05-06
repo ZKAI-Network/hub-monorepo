@@ -44,7 +44,11 @@ ENV RUSTFLAGS="-C target-feature=-crt-static"
 COPY --chown=node:node --from=prune /home/node/app/out/json/ .
 COPY --chown=node:node --from=prune /home/node/app/out/yarn.lock ./yarn.lock
 
-RUN yarn install --frozen-lockfile --network-timeout 1800000
+RUN yarn install --frozen-lockfile 
+RUN yarn add aws-sdk --ignore-workspace-root-check
+RUN  yarn add @aws-sdk/client-kinesis --ignore-workspace-root-check
+#--network-timeout 1800000
+
 
 # Copy source code (and all other relevant files)
 COPY --chown=node:node --from=prune /home/node/app/out/full/ .
@@ -90,5 +94,8 @@ COPY --from=app / /
 # Repeat of above since it is lost between build stages
 USER node
 WORKDIR /home/node/app/apps/replicator
+# RUN yarn add aws-sdk --ignore-workspace-root-check
+# Copy the PEM file from the local directory to the build directory
+COPY rds-ca-rsa2048-g1.pem /home/node/app/apps/replicator/rds-ca-rsa2048-g1.pem
 
 CMD ["node", "build/app.js"]

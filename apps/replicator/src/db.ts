@@ -401,12 +401,13 @@ export interface Tables {
   storageAllocations: StorageAllocationRow;
 }
 
-export const getDbClient = (connectionString?: string) => {
+export const getDbClient = (connectionString?: string, sslObject?: Object) => {
   return new Kysely<Tables>({
     dialect: new PostgresDialect({
       pool: new Pool({
         max: 10,
         connectionString,
+        ssl: sslObject? sslObject : false,
       }),
       cursor: Cursor,
     }),

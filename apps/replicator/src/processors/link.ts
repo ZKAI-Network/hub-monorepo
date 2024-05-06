@@ -2,8 +2,12 @@ import { LinkAddMessage, LinkRemoveMessage, MessageType } from "@farcaster/hub-n
 import { Selectable } from "kysely";
 import { buildAddRemoveMessageProcessor } from "../messageProcessor.js";
 import { LinkRow, executeTakeFirst } from "../db.js";
-import { farcasterTimeToDate } from "../util.js";
+import { farcasterTimeToDate, putKinesisRecords } from "../util.js";
 import { HubEventProcessingBlockedError } from "../error.js";
+import AWS from "aws-sdk";
+import { Records } from "aws-sdk/clients/rdsdataservice.js";
+import {AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY } from "../env.js";
+
 
 const { processAdd, processRemove } = buildAddRemoveMessageProcessor<
   LinkAddMessage,
@@ -33,7 +37,7 @@ const { processAdd, processRemove } = buildAddRemoveMessageProcessor<
         .$call((qb) => (targetFid ? qb.where("targetFid", "=", targetFid) : qb)),
     );
   },
-  async deleteDerivedRow(message, trx) {
+  async deleteDerivedRow(message, trx, isHubEvent: boolean = false) {
     const { type, targetFid } = message.data.linkBody;
 
     const now = new Date();
@@ -48,7 +52,7 @@ const { processAdd, processRemove } = buildAddRemoveMessageProcessor<
         .returningAll(),
     );
   },
-  async mergeDerivedRow(message, deleted, trx) {
+  async mergeDerivedRow(message, deleted, trx, isHubEvent: boolean = false) {
     const { type, targetFid, displayTimestamp } = message.data.linkBody;
 
     const fidExists = await trx.selectFrom("fids").where("fid", "=", message.data.fid).executeTakeFirst();
@@ -64,6 +68,29 @@ const { processAdd, processRemove } = buildAddRemoveMessageProcessor<
           blockedOnFid: targetFid,
         });
     }
+    
+    let records = [];
+    
+    let recordsJson = {
+      hash: message.hash,
+      fid: message.data.fid,
+      targetFid: message.data.linkBody.targetFid || null,
+      type: message.data.linkBody.type,
+      timestamp: farcasterTimeToDate(message.data.timestamp),
+      displayTimestamp: farcasterTimeToDate(displayTimestamp) || null,
+      deletedAt: deleted ? new Date() : null,
+    }
+    
+    records = [
+      {
+        Data: JSON.stringify(recordsJson),
+        PartitionKey: "LINK_ADD",
+      },
+    ];
+    
+    // console.log(`push kinesis start`);
+    // await putKinesisRecords(records, "farcaster-stream");
+    // console.log(`push kinesis end`);
 
     return await executeTakeFirst(
       trx

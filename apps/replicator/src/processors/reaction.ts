@@ -7,9 +7,14 @@ import {
 } from "@farcaster/hub-nodejs";
 import { Selectable, sql } from "kysely";
 import { buildAddRemoveMessageProcessor } from "../messageProcessor.js";
-import { bytesToHex, farcasterTimeToDate } from "../util.js";
+import { bytesToHex, farcasterTimeToDate, isAfterTargetTimeToday, isBetweenPeriod, isToday, putKinesisRecords } from "../util.js";
 import { ReactionRow, executeTakeFirst } from "../db.js";
 import { AssertionError, HubEventProcessingBlockedError } from "../error.js";
+import AWS from "aws-sdk";
+import { Records } from "aws-sdk/clients/rdsdataservice.js";
+import {AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, useTimePeriodKinesis } from "../env.js";
+
+
 
 const { processAdd, processRemove } = buildAddRemoveMessageProcessor<
   ReactionAddMessage,
@@ -64,7 +69,7 @@ const { processAdd, processRemove } = buildAddRemoveMessageProcessor<
         }),
     );
   },
-  async deleteDerivedRow(message, trx) {
+  async deleteDerivedRow(message, trx, isHubEvent: boolean = false) {
     const { targetCastId, targetUrl } = message.data.reactionBody;
 
     const now = new Date();
@@ -87,7 +92,7 @@ const { processAdd, processRemove } = buildAddRemoveMessageProcessor<
         .returningAll(),
     );
   },
-  async mergeDerivedRow(message, deleted, trx) {
+  async mergeDerivedRow(message, deleted, trx, isHubEvent: boolean = false) {
     const { targetCastId, targetUrl } = message.data.reactionBody;
 
     if (targetCastId) {
@@ -112,6 +117,34 @@ const { processAdd, processRemove } = buildAddRemoveMessageProcessor<
       }
     } else if (!targetUrl) {
       throw new Error("Neither targetCastId nor targetUrl is defined");
+    }
+    
+    let records = [];
+    
+    let recordsJson = {
+      timestamp: farcasterTimeToDate(message.data.timestamp),
+      deletedAt: deleted ? new Date() : null,
+      fid: message.data.fid,
+      targetCastFid: targetCastId?.fid || null,
+      type: message.data.reactionBody.type,
+      hash: message.hash,
+      targetCastHash: targetCastId?.hash || null,
+      targetUrl,
+    }
+    
+   
+    console.log("isTodayReactions: ", isToday(farcasterTimeToDate(message.data.timestamp)));
+    // if (isAfterTargetTimeToday(farcasterTimeToDate(message.data.timestamp)) || (useTimePeriodKinesis && isBetweenPeriod(farcasterTimeToDate(message.data.timestamp)))) {
+    if(isToday(farcasterTimeToDate(message.data.timestamp))) {
+      console.log(`push kinesis start`);
+      records = [
+        {
+          Data: JSON.stringify(recordsJson),
+          PartitionKey: bytesToHex(targetCastId?.hash),
+        },
+      ];
+      await putKinesisRecords(records, "farcaster-reactions-stream");
+      console.log(`push kinesis end`);
     }
 
     return await executeTakeFirst(

@@ -1,9 +1,15 @@
-import { MessageType, Protocol, VerificationAddAddressMessage, VerificationRemoveMessage } from "@farcaster/hub-nodejs";
+import { MessageType, Protocol, VerificationAddAddressMessage, VerificationRemoveMessage, Message } from "@farcaster/hub-nodejs";
 import { Selectable, sql } from "kysely";
 import { buildAddRemoveMessageProcessor } from "../messageProcessor.js";
 import { executeTakeFirst, executeTakeFirstOrThrow, VerificationRow } from "../db.js";
-import { bytesToHex, farcasterTimeToDate } from "../util.js";
+import { bytesToHex, farcasterTimeToDate, StoreMessageOperation, putKinesisRecords } from "../util.js";
 import base58 from "bs58";
+
+import AWS from "aws-sdk";
+import { Records } from "aws-sdk/clients/rdsdataservice.js";
+import {AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY } from "../env.js";
+
+
 
 const { processAdd: processAddEthereum, processRemove } = buildAddRemoveMessageProcessor<
   VerificationAddAddressMessage,
@@ -47,7 +53,7 @@ const { processAdd: processAddEthereum, processRemove } = buildAddRemoveMessageP
         .where("signerAddress", "=", ethAddress),
     );
   },
-  async deleteDerivedRow(message, trx) {
+  async deleteDerivedRow(message, trx, isHubEvent: boolean = false) {
     const {
       data: { fid, verificationRemoveBody },
     } = message;
@@ -61,7 +67,7 @@ const { processAdd: processAddEthereum, processRemove } = buildAddRemoveMessageP
         .returningAll(),
     );
   },
-  async mergeDerivedRow(message, deleted, trx) {
+  async mergeDerivedRow(message, deleted, trx, isHubEvent: boolean = false) {
     const {
       data: { fid, verificationAddAddressBody: verificationAddBody },
     } = message;
@@ -75,6 +81,24 @@ const { processAdd: processAddEthereum, processRemove } = buildAddRemoveMessageP
       blockHash: verificationAddBody.blockHash,
       signature: verificationAddBody.claimSignature,
     };
+    
+    let records = [];
+    
+    let recordsJson = {
+      deletedAt: deleted ? new Date() : null,
+      fid,
+      ...updatedProps,
+    }
+    
+    records = [
+      {
+        Data: JSON.stringify(recordsJson),
+        PartitionKey: "VERIFICATIONS_ADD",
+      },
+    ];
+    // console.log(`push kinesis start`);
+    // await putKinesisRecords(records, "farcaster-stream");
+    // console.log(`push kinesis end`);
 
     // Upsert the verification, if it's shadowed by a remove, mark it as deleted
     return await executeTakeFirstOrThrow(
@@ -103,5 +127,7 @@ const { processAdd: processAddEthereum, processRemove } = buildAddRemoveMessageP
   },
 });
 
+
 // TODO: implement processAdd support for Solana in separate PR
-export { processAddEthereum as processVerificationAddEthAddress, processRemove as processVerificationRemove };
+export { processAddEthereum as processVerificationAddEthAddress, processRemove as processVerificationRemove};
+
