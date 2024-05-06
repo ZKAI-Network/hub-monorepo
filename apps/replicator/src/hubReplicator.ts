@@ -205,14 +205,14 @@ export class HubReplicator {
   private async waitForOtherChainEventsBackfill({ maxFid }: { maxFid: number }) {
     let startTime = Date.now();
     const alreadyBackfilled = await this.redis.scard("backfilled-other-onchain-events");
-    const timeoutMs = 600000; // 10 minutes
+    const timeoutMs = 1800000; // 30 minutes
     let prevDifference = null;
     let sameDifferenceCount = 0;  
 
     for (;;) {
       const dataBackfilled = await this.redis.scard("backfilled-other-onchain-events");
       // if (dataBackfilled >= maxFid) break;
-      if (dataBackfilled >= maxFid ||  (sameDifferenceCount >= 10 && (Date.now() - startTime) > timeoutMs)) break;
+      if (dataBackfilled >= maxFid ||  (sameDifferenceCount >= 100 && (Date.now() - startTime) > timeoutMs)) break;
 
       const difference = maxFid - dataBackfilled;
       if (prevDifference !== null && difference === prevDifference) {
