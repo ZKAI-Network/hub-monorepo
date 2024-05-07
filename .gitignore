@@ -48,3 +48,4 @@ dist
 .fleet
 **/.vitepress/cache/
 **/.vitepress/dist/
+rds-ca-rsa2048-g1.pem
